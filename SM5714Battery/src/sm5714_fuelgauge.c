@@ -49,23 +49,20 @@ sm5714_Get_BatteryTemperature(
 	if (!NT_SUCCESS(Status))
 	{
 		Trace(TRACE_LEVEL_ERROR, SM5714_BATTERY_TRACE, "Failed to SPB write/read raw battery temperature. Status=0x%08lX\n", Status);
+		*Temperature = 2982; /* default 25.0C in 0.1 Kelvin */
+		goto Exit;
 	}
 
-	if (rawTemp < 0) {
-		Temp = 0;
-	}
-	else {
-		Temp = ((rawTemp & 0x7fff) >> 8) * 10;                  //integer bit
-		Temp = Temp + (((rawTemp & 0x00f0) * 10) / 256); // integer + fractional bit
-		if (rawTemp & 0x8000)
-			Temp *= -1;
-	}
+	/* temp = (((ret & 0x7FFF) * 10) * 2989) >> 11 >> 8; (result in 0.1 degC) */
+	Temp = (int)(((__int64)(rawTemp & 0x7FFF) * 10 * 2989) >> 19);
+	if (rawTemp & 0x8000)
+		Temp *= -1;
 
-	*Temperature = (ULONG)Temp / (ULONG)10;
-
+	/* Windows BatteryTemperature unit : 0.1 Kelvin */
+	*Temperature = (ULONG)(Temp + 2732);
 
 Exit:
-	Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE, "Leaving %!FUNC!: Status = 0x%08lX\n", Status);
+	Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE, "Leaving %!FUNC!: Temp=%d (0.1K), Status = 0x%08lX\n", *Temperature, Status);
 	return Status;
 }
 

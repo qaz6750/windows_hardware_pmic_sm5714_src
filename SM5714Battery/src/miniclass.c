@@ -224,7 +224,6 @@ Exit:
 	return Status;
 }
 
-/*
 NTSTATUS
 SM5714BatteryQueryBatteryEstimatedTime(
 	PSM5714_BATTERY_FDO_DATA DevExt,
@@ -233,69 +232,77 @@ SM5714BatteryQueryBatteryEstimatedTime(
 )
 {
 	NTSTATUS Status = STATUS_SUCCESS;
-	UCHAR Flags = 0;
-	UINT16 ETA = 0;
+	ULONG Capacity = 0;
+	ULONG Voltage = 0;
+	int Current = 0;
+	LONG Rate_mW = 0;
+	ULONG AbsRate_mW = 0;
+	ULONG RemainingCapacity_mWh = 0;
 
 	Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE, "Entering %!FUNC!\n");
 
-	if (AtRate == 0)
+	/* Get current SOC (0-1000, in 0.1% units) */
+	Status = sm5714_Get_BatterySoC(DevExt, &Capacity);
+	if (!NT_SUCCESS(Status))
 	{
-		Status = SpbReadDataSynchronously(&DevExt->I2CContext, 0x0A, &Flags, 2);
-		if (!NT_SUCCESS(Status))
-		{
-			Trace(TRACE_LEVEL_ERROR, SM5714_BATTERY_TRACE, "SpbReadDataSynchronously failed with Status = 0x%08lX\n", Status);
-			goto Exit;
-		}
+		*ResultValue = BATTERY_UNKNOWN_TIME;
+		goto Exit;
+	}
 
-		if (Flags & (1 << 0) || Flags & (1 << 1))
-		{
-			Status = SpbReadDataSynchronously(&DevExt->I2CContext, 0x16, &ETA, 2);
-			if (!NT_SUCCESS(Status))
-			{
-				Trace(TRACE_LEVEL_ERROR, SM5714_BATTERY_TRACE, "SpbReadDataSynchronously failed with Status = 0x%08lX\n", Status);
-				goto Exit;
-			}
-
-			if (ETA == 0xFFFF)
-			{
-				*ResultValue = BATTERY_UNKNOWN_TIME;
-
-				Trace(
-					TRACE_LEVEL_INFORMATION,
-					SM5714_BATTERY_TRACE,
-					"BatteryEstimatedTime: BATTERY_UNKNOWN_TIME\n");
-			}
-			else
-			{
-				*ResultValue = ETA * 60; // Seconds
-
-				Trace(
-					TRACE_LEVEL_INFORMATION,
-					SM5714_BATTERY_TRACE,
-					"BatteryEstimatedTime: %d seconds\n",
-					*ResultValue);
-			}
-		}
-		else
-		{
-			*ResultValue = BATTERY_UNKNOWN_TIME;
-
-			Trace(
-				TRACE_LEVEL_INFORMATION,
-				SM5714_BATTERY_TRACE,
-				"BatteryEstimatedTime: BATTERY_UNKNOWN_TIME\n");
-		}
+	if (AtRate > 0)
+	{
+		/* AtRate specifies drain rate in mW (positive = drain) */
+		AbsRate_mW = (ULONG)AtRate;
 	}
 	else
 	{
-		*ResultValue = BATTERY_UNKNOWN_TIME;
+		/* Use present rate of drain */
+		Status = sm5714_Get_BatteryVoltage(DevExt, &Voltage);
+		if (!NT_SUCCESS(Status))
+		{
+			*ResultValue = BATTERY_UNKNOWN_TIME;
+			goto Exit;
+		}
 
-		Trace(
-			TRACE_LEVEL_INFORMATION,
-			SM5714_BATTERY_TRACE,
-			"BatteryEstimatedTime: BATTERY_UNKNOWN_TIME for AtRate = %d\n",
-			AtRate);
+		Status = sm5714_Get_BatteryCurrent(DevExt, (PULONG)&Current);
+		if (!NT_SUCCESS(Status))
+		{
+			*ResultValue = BATTERY_UNKNOWN_TIME;
+			goto Exit;
+		}
+
+		/* Rate_mW: positive = charging, negative = discharging */
+		Rate_mW = ((LONG)Current * (LONG)Voltage) / 1000;
+
+		if (Rate_mW >= 0)
+		{
+			/* Not discharging - cannot estimate time to empty */
+			*ResultValue = BATTERY_UNKNOWN_TIME;
+
+			Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE,
+				"BatteryEstimatedTime: BATTERY_UNKNOWN_TIME (charging/idle, Rate=%d mW)\n",
+				Rate_mW);
+			goto Exit;
+		}
+
+		AbsRate_mW = (ULONG)(-Rate_mW);
 	}
+
+	if (AbsRate_mW == 0)
+	{
+		*ResultValue = BATTERY_UNKNOWN_TIME;
+		goto Exit;
+	}
+
+	/* remaining_mWh = SOC(0.1%) * FullChargedCapacity_mWh / 1000 */
+	RemainingCapacity_mWh = (ULONG)Capacity * DevExt->FullChargedCapacity_mWh / 1000;
+
+	/* time_seconds = remaining_mWh * 3600 / rate_mW */
+	*ResultValue = (RemainingCapacity_mWh * 3600) / AbsRate_mW;
+
+	Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE,
+		"BatteryEstimatedTime: Remaining=%d mWh, DrainRate=%d mW, Time=%d seconds\n",
+		RemainingCapacity_mWh, AbsRate_mW, *ResultValue);
 
 Exit:
 	Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE,
@@ -303,7 +310,6 @@ Exit:
 		Status);
 	return Status;
 }
-*/
 
 _Use_decl_annotations_
 NTSTATUS
@@ -364,7 +370,7 @@ Return Value:
 	BATTERY_MANUFACTURE_DATE ManufactureDate = { 0 };
 
 	unsigned short rawTemp = 0;
-	int Temperature = 0;
+	ULONG Temperature = 0;
 	USHORT DateData = 0;
 
 	Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE, "Entering %!FUNC!\n");
@@ -399,7 +405,6 @@ Return Value:
 		Status = STATUS_SUCCESS;
 		break;
 
-	/*
 	case BatteryEstimatedTime:
 		Status = SM5714BatteryQueryBatteryEstimatedTime(DevExt, AtRate, &ResultValue);
 		if (!NT_SUCCESS(Status))
@@ -412,7 +417,6 @@ Return Value:
 		ReturnBufferLength = sizeof(ResultValue);
 		Status = STATUS_SUCCESS;
 		break;
-	*/
 
 	case BatteryUniqueID:
 
@@ -530,9 +534,14 @@ Return Value:
 
 	case BatteryTemperature:
 
-		sm5714_Get_BatteryTemperature(DevExt, &Temperature);
+		Status = sm5714_Get_BatteryTemperature(DevExt, &Temperature);
+		if (!NT_SUCCESS(Status))
+		{
+			Trace(TRACE_LEVEL_ERROR, SM5714_BATTERY_TRACE, "sm5714_Get_BatteryTemperature failed with Status = 0x%08lX\n", Status);
+			goto Exit;
+		}
 
-		Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE, "Battery temperature: %d C\n", Temperature);
+		Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE, "Battery temperature: %d (0.1 K)\n", Temperature);
 
 		ReturnBuffer = &Temperature;
 		ReturnBufferLength = sizeof(ULONG);
