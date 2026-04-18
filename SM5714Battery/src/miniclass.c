@@ -21,6 +21,7 @@ Abstract:
 #include "usbfnbase.h"
 #include "miniclass.tmh"
 #include "..\inc\sm5714_fuelgauge.h"
+#include <acpiioct.h>
 
 //------------------------------------------------------------------- Prototypes
 
@@ -576,6 +577,50 @@ QueryInformationEnd:
 	return Status;
 }
 
+//
+// Query the ACPI GBST method to get charging state from TypeC detection.
+// Returns TRUE if charging (charger cable attached), FALSE if discharging.
+//
+static BOOLEAN Sm5714QueryChargingState(_In_ PSM5714_BATTERY_FDO_DATA DevExt)
+{
+	ACPI_EVAL_INPUT_BUFFER input = { 0 };
+	input.Signature = ACPI_EVAL_INPUT_BUFFER_SIGNATURE;
+	RtlCopyMemory(input.MethodName, "GBST", 4);
+
+	ULONG const outLen = sizeof(ACPI_EVAL_OUTPUT_BUFFER) +
+		sizeof(ACPI_METHOD_ARGUMENT);
+	PACPI_EVAL_OUTPUT_BUFFER output =
+		(PACPI_EVAL_OUTPUT_BUFFER)ExAllocatePoolZero(
+			NonPagedPoolNx, outLen, 'tsbG');
+	if (!output)
+		return FALSE;
+
+	WDF_MEMORY_DESCRIPTOR inDesc, outDesc;
+	WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&inDesc, &input, sizeof(input));
+	WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&outDesc, output, outLen);
+
+	NTSTATUS status = WdfIoTargetSendIoctlSynchronously(
+		WdfDeviceGetIoTarget(DevExt->Device),
+		NULL,
+		IOCTL_ACPI_EVAL_METHOD,
+		&inDesc,
+		&outDesc,
+		NULL,
+		NULL);
+
+	BOOLEAN charging = FALSE;
+	if (NT_SUCCESS(status) &&
+		output->Signature == ACPI_EVAL_OUTPUT_BUFFER_SIGNATURE &&
+		output->Count >= 1 &&
+		output->Argument[0].Type == ACPI_METHOD_ARGUMENT_INTEGER)
+	{
+		charging = (output->Argument[0].Argument != 0);
+	}
+
+	ExFreePool(output);
+	return charging;
+}
+
 _Use_decl_annotations_
 NTSTATUS
 SM5714BatteryQueryStatus(
@@ -638,9 +683,10 @@ Return Value:
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "CURRENT: %d mA\n", Current);
 
 	//
-	// Fetch battery power state (use a dirty workaround for now)
+	// Determine power state from TypeC detection (via ACPI GBST method).
+	// GBST returns 1 when a charger is attached, 0 when discharging/OTG.
 	//
-	if (Current >= 8) {
+	if (Sm5714QueryChargingState(DevExt)) {
 		Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE, "BATTERY_POWER_ON_LINE\n");
 		BatteryStatus->PowerState = BATTERY_POWER_ON_LINE;
 	}
