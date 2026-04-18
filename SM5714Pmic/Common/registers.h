@@ -14,16 +14,39 @@ enum chg_status_regs {
 
 enum chg_cntl_regs {
     SM5714_CHG_REG_CNTL1 = 0x13,
+    SM5714_CHG_REG_CNTL2 = 0x14,       // OP_MODE register (bits [3:0])
     SM5714_CHG_REG_VBUSCNTL = 0x15,
     SM5714_CHG_REG_CHGCNTL2 = 0x18,
     SM5714_CHG_REG_CHGCNTL4 = 0x1A,
     SM5714_CHG_REG_CHGCNTL5 = 0x1B,
+    SM5714_CHG_REG_BSTCNTL1 = 0x23,    // BSTOUT[3:0] + OTG_CURRENT[7:6]
 };
 
 //
-// Charger Register definitions
+// Charger operation modes (CNTL2 bits [3:0])
 //
+#define OP_MODE_SUSPEND         0x00
+#define OP_MODE_CHG_ON_VBUS     0x05
+#define OP_MODE_USB_OTG         0x07
+#define OP_MODE_FLASH_BOOST     0x08
+#define OP_MODE_MASK            0x0F
 
+//
+// Boost output voltage (BSTCNTL1 bits [3:0])
+//
+#define BSTOUT_5100mV           0x06
+
+//
+// OTG current limit (BSTCNTL1 bits [7:6])
+//
+#define OTG_CURRENT_500mA       (0x0 << 6)
+#define OTG_CURRENT_900mA       (0x1 << 6)
+#define OTG_CURRENT_1200mA      (0x2 << 6)
+#define OTG_CURRENT_1500mA      (0x3 << 6)
+
+//
+// Type-C / USBPD Register definitions
+//
 enum typec_pdic_rid {
 	REG_RID_UNDF = 0x00,
 	REG_RID_255K = 0x03,
@@ -103,5 +126,54 @@ enum typec_usbpd_reg {
 	SM5714_REG_PD_STATE4 = 0xD9,
 	SM5714_REG_PD_STATE5 = 0xDA
 };
+
+//
+// INT/STATUS register bit masks
+//
+#define SM5714_INT_STATUS1_VBUSPOK       (1 << 0)
+#define SM5714_INT_STATUS1_TMR_EXP       (1 << 1)
+#define SM5714_INT_STATUS1_ATTACH        (1 << 3)
+#define SM5714_INT_STATUS1_DETACH        (1 << 4)
+#define SM5714_INT_STATUS1_ABNORMAL_DEV  (1 << 7)
+
+#define SM5714_INT_STATUS2_PD_RID_DETECT (1 << 0)
+#define SM5714_INT_STATUS2_VCONN_DISCHG  (1 << 2)
+#define SM5714_INT_STATUS2_SRC_ADV_CHG   (1 << 4)
+#define SM5714_INT_STATUS2_VBUS_0V       (1 << 5)
+
+#define SM5714_INT_STATUS3_WATER         (1 << 0)
+#define SM5714_INT_STATUS3_VCONN_OCP     (1 << 3)
+#define SM5714_INT_STATUS3_WATER_RLS     (1 << 4)
+
+//
+// CC_STATUS register (0x28) field masks
+//
+#define SM5714_CC_ATTACH_TYPE            0x07
+#define SM5714_CC_ADV_CURR               0x18
+#define SM5714_CC_CABLE_FLIP             0x20
+
+// Attach type values (CC_STATUS bits [2:0])
+#define SM5714_ATTACH_NONE               0x00
+#define SM5714_ATTACH_SOURCE             0x01   // We are Sink (charger connected)
+#define SM5714_ATTACH_SINK               0x02   // We are Source (OTG device connected)
+#define SM5714_ATTACH_AUDIO              0x03
+
+// RP current advertisement (CC_STATUS bits [4:3])
+#define SM5714_RP_CURRENT_DEFAULT        0x00   // 500mA
+#define SM5714_RP_CURRENT_1_5A           0x08   // 1.5A
+#define SM5714_RP_CURRENT_3_0A           0x10   // 3.0A
+
+//
+// Interrupt masks for enabling events we care about
+//
+#define USBPD_ENABLED_INT1   (SM5714_INT_STATUS1_VBUSPOK | \
+                              SM5714_INT_STATUS1_ATTACH  | \
+                              SM5714_INT_STATUS1_DETACH)
+
+#define USBPD_ENABLED_INT2   (SM5714_INT_STATUS2_SRC_ADV_CHG | \
+                              SM5714_INT_STATUS2_VBUS_0V)
+
+#define USBPD_ENABLED_INT3   (SM5714_INT_STATUS3_WATER | \
+                              SM5714_INT_STATUS3_WATER_RLS)
 
 #endif

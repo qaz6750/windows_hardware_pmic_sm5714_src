@@ -29,4 +29,33 @@ update_reg(
 	unsigned short val
 );
 
+//
+// 8-bit register helpers for USBPD sub-device
+//
+
+NTSTATUS
+write_reg8(
+	PDEVICE_CONTEXT pDevice,
+	unsigned long spbIndex,
+	unsigned char reg,
+	unsigned char data
+);
+
+NTSTATUS
+read_reg8(
+	PDEVICE_CONTEXT pDevice,
+	unsigned long spbIndex,
+	unsigned char reg,
+	unsigned char *data
+);
+
+NTSTATUS
+update_reg8(
+	PDEVICE_CONTEXT pDevice,
+	unsigned long spbIndex,
+	unsigned char reg,
+	unsigned char mask,
+	unsigned char val
+);
+
 #endif // SM5714_H

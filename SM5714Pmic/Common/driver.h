@@ -34,9 +34,10 @@ typedef struct _DEVICE_CONTEXT
 {
 
 	WDFDEVICE FxDevice;
-	WDFINTERRUPT InterruptObject;
+	WDFINTERRUPT ChgInterrupt;
+	WDFINTERRUPT PdInterrupt;
 	WDFQUEUE ReportQueue;
-	SPB_CONTEXT     SpbContexts[2];
+	SPB_CONTEXT     SpbContexts[3];
 	ULONG           SpbContextCount;
 	BOOLEAN DevicePoweredOn;
 	WDFWAITLOCK DataLock;
@@ -45,6 +46,12 @@ typedef struct _DEVICE_CONTEXT
 	ULONG                           InputCurrentLimit;   // mA
 	ULONG                           ChargingCurrent;     // mA
 	ULONG                           TopoffCurrent;       // mA
+
+	// Type-C state
+	UCHAR                           AttachType;          // SM5714_ATTACH_xxx
+	UCHAR                           CcOrientation;       // 0=CC1, 1=CC2, 2=Open
+	BOOLEAN                         VbusPresent;
+	BOOLEAN                         IsAttached;
 
 } DEVICE_CONTEXT, *PDEVICE_CONTEXT;
 
@@ -63,6 +70,9 @@ EVT_WDF_DRIVER_DEVICE_ADD EvtDeviceAdd;
 EVT_WDFDEVICE_WDM_IRP_PREPROCESS EvtWdmPreprocessMnQueryId;
 
 EVT_WDF_IO_QUEUE_IO_INTERNAL_DEVICE_CONTROL EvtInternalDeviceControl;
+
+EVT_WDF_INTERRUPT_ISR EvtChgInterruptIsr;
+EVT_WDF_INTERRUPT_ISR EvtPdInterruptIsr;
 
 //
 // Helper macros

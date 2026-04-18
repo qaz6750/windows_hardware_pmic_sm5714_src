@@ -1,4 +1,6 @@
 #include "driver.h"
+#include "registers.h"
+#include "spbhelper.h"
 #include "..\Charger\charger.h"
 #include "..\TypeC\typec.h"
 
@@ -6,6 +8,70 @@ static ULONG DebugLevel = 100;
 static ULONG DebugCatagories = DBG_INIT || DBG_PNP || DBG_IOCTL;
 
 #define GET_INTEGER(_arg_) (*(PULONG UNALIGNED)((_arg_)->Data))
+
+//
+// ISR for charger interrupt (GPIO 54) - currently not used
+// Runs at PASSIVE_LEVEL due to PassiveHandling = TRUE.
+//
+BOOLEAN
+EvtChgInterruptIsr(
+    _In_ WDFINTERRUPT Interrupt,
+    _In_ ULONG MessageID
+)
+{
+    UNREFERENCED_PARAMETER(Interrupt);
+    UNREFERENCED_PARAMETER(MessageID);
+
+    // Charger interrupt: acknowledge only.
+    // Charger state is managed through TypeC events.
+    return TRUE;
+}
+
+//
+// ISR for USBPD interrupt (GPIO 142)
+// Runs at PASSIVE_LEVEL (PassiveHandling = TRUE), so we can
+// safely perform I2C transactions directly.
+//
+// CRITICAL: Must ALWAYS read INT registers to deassert the INT line.
+// SM5714 holds INT low until registers are read. With Level trigger,
+// failing to clear will cause an interrupt storm.
+//
+BOOLEAN
+EvtPdInterruptIsr(
+    _In_ WDFINTERRUPT Interrupt,
+    _In_ ULONG MessageID
+)
+{
+    UNREFERENCED_PARAMETER(MessageID);
+
+    PDEVICE_CONTEXT pDevice = GetDeviceContext(
+        WdfInterruptGetDevice(Interrupt));
+
+    // If USBPD I2C bus is not available, we cannot service this interrupt
+    if (pDevice->SpbContextCount < 2)
+        return FALSE;
+
+    if (!pDevice->DevicePoweredOn)
+    {
+        // Not ready to process events yet, but must clear interrupt
+        // registers to deassert the INT line and prevent storm/deadlock.
+        UCHAR dummy;
+        read_reg8(pDevice, SPB_USBPD_INDEX, SM5714_REG_INT1, &dummy);
+        read_reg8(pDevice, SPB_USBPD_INDEX, SM5714_REG_INT2, &dummy);
+        read_reg8(pDevice, SPB_USBPD_INDEX, SM5714_REG_INT3, &dummy);
+        read_reg8(pDevice, SPB_USBPD_INDEX, SM5714_REG_INT4, &dummy);
+        read_reg8(pDevice, SPB_USBPD_INDEX, SM5714_REG_INT5, &dummy);
+        return TRUE;
+    }
+
+    // PassiveHandling = TRUE means we are already at PASSIVE_LEVEL.
+    // Process the interrupt inline - I2C access is safe here.
+    WdfWaitLockAcquire(pDevice->DataLock, NULL);
+    typec_process_interrupt(pDevice);
+    WdfWaitLockRelease(pDevice->DataLock);
+
+    return TRUE;
+}
 
 static
 NTSTATUS
@@ -118,7 +184,7 @@ Status
 {
     PDEVICE_CONTEXT pDevice = GetDeviceContext(FxDevice);
     NTSTATUS status = STATUS_INSUFFICIENT_RESOURCES;
-    pDevice->SpbContextCount = 0;  // Start with zero I²C handles
+    pDevice->SpbContextCount = 0;
 
     UNREFERENCED_PARAMETER(FxResourcesRaw);
 
@@ -141,25 +207,31 @@ Status
             pDescriptor->u.Connection.Class == CM_RESOURCE_CONNECTION_CLASS_SERIAL &&
             pDescriptor->u.Connection.Type == CM_RESOURCE_CONNECTION_TYPE_SERIAL_I2C)
         {
-            // We found an I²C resource. Use pDevice->SpbContexts[pDevice->SpbContextCount].
             if (pDevice->SpbContextCount >= ARRAYSIZE(pDevice->SpbContexts))
             {
-                // We only have space for 2 in this example. You can handle this however you like.
-                status = STATUS_BUFFER_TOO_SMALL;
                 break;
             }
 
             SPB_CONTEXT* spbCtx = &pDevice->SpbContexts[pDevice->SpbContextCount];
 
-            // Store the resource IDs
             spbCtx->I2cResHubId.LowPart = pDescriptor->u.Connection.IdLowPart;
             spbCtx->I2cResHubId.HighPart = pDescriptor->u.Connection.IdHighPart;
 
-            // Initialize (open) the SPB target for this address
             status = SpbTargetInitialize(FxDevice, spbCtx);
             if (!NT_SUCCESS(status))
             {
-                // If it fails, you can break or keep trying other resources
+                if (pDevice->SpbContextCount == 0)
+                {
+                    // First I2C (charger) is required - fail hard
+                    Print(DEBUG_LEVEL_ERROR, DBG_PNP,
+                          "Charger I2C target open failed - 0x%x\n", status);
+                    return status;
+                }
+
+                // Second I2C (USBPD) or third I2C (MUIC) failure is non-fatal
+                Print(DEBUG_LEVEL_INFO, DBG_PNP,
+                      "I2C target #%lu open failed - 0x%x, some features disabled\n",
+                      pDevice->SpbContextCount, status);
                 break;
             }
 
@@ -167,15 +239,12 @@ Status
         }
     }
 
-    // If we never found any I²C connections, fail
     if (pDevice->SpbContextCount == 0)
     {
-        status = STATUS_NOT_FOUND;
+        return STATUS_NOT_FOUND;
     }
 
-
-
-    return status;
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -281,6 +350,31 @@ Status
 		goto exit;
 	}
 
+    // Initialize the USBPD Type-C controller if we have the second I2C bus
+    if (pDevice->SpbContextCount >= 2)
+    {
+        status = typec_reg_init(pDevice);
+        if (!NT_SUCCESS(status))
+        {
+            Print(DEBUG_LEVEL_ERROR, DBG_INIT,
+                  "USBPD init failed - 0x%x, USB Type-C will not work\n", status);
+            // Non-fatal: charging still works without TypeC detection
+            status = STATUS_SUCCESS;
+        }
+        else
+        {
+            pDevice->DevicePoweredOn = TRUE;
+
+            // Check if a cable is already plugged in
+            typec_check_initial_state(pDevice);
+        }
+    }
+    else
+    {
+        Print(DEBUG_LEVEL_INFO, DBG_INIT,
+              "No USBPD I2C resource found, TypeC detection disabled\n");
+    }
+
 exit:
     return status;
 }
@@ -311,9 +405,16 @@ Status
     PDEVICE_CONTEXT pDevice = GetDeviceContext(FxDevice);
     NTSTATUS status = STATUS_SUCCESS;
 
+    pDevice->DevicePoweredOn = FALSE;
+
     // Only disable charging if transitioning to OFF state (S5)
     if (FxPreviousState == WdfPowerDeviceD3Final)
     {
+        // Disable OTG if active before shutting down
+        // SM5714_ATTACH_SINK = 0x02
+        if (pDevice->AttachType == 0x02)
+            typec_set_otg_mode(pDevice, false);
+
         enable_charging(pDevice, false);
     }
 
@@ -396,6 +497,45 @@ EvtDeviceAdd(
     //
     devContext = GetDeviceContext(device);
     devContext->FxDevice = device;
+
+    //
+    // Create interrupt objects for the two GPIO interrupts in _CRS.
+    // WDF maps them in order: first = charger (GPIO 54), second = USBPD (GPIO 142).
+    //
+
+    // Charger interrupt (index 0)
+    {
+        WDF_INTERRUPT_CONFIG intConfig;
+        WDF_INTERRUPT_CONFIG_INIT(&intConfig, EvtChgInterruptIsr, NULL);
+        intConfig.PassiveHandling = TRUE;
+
+        status = WdfInterruptCreate(device, &intConfig,
+                                    WDF_NO_OBJECT_ATTRIBUTES,
+                                    &devContext->ChgInterrupt);
+        if (!NT_SUCCESS(status))
+        {
+            Print(DEBUG_LEVEL_ERROR, DBG_PNP,
+                  "Charger interrupt create failed 0x%x\n", status);
+            return status;
+        }
+    }
+
+    // USBPD interrupt (index 1)
+    {
+        WDF_INTERRUPT_CONFIG intConfig;
+        WDF_INTERRUPT_CONFIG_INIT(&intConfig, EvtPdInterruptIsr, NULL);
+        intConfig.PassiveHandling = TRUE;
+
+        status = WdfInterruptCreate(device, &intConfig,
+                                    WDF_NO_OBJECT_ATTRIBUTES,
+                                    &devContext->PdInterrupt);
+        if (!NT_SUCCESS(status))
+        {
+            Print(DEBUG_LEVEL_ERROR, DBG_PNP,
+                  "USBPD interrupt create failed 0x%x\n", status);
+            return status;
+        }
+    }
 
     WDF_IO_QUEUE_CONFIG_INIT(&queueConfig, WdfIoQueueDispatchManual);
 

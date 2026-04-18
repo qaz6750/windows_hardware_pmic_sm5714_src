@@ -30,8 +30,8 @@ extern "C"
 #define FuncExit 
 #define WPP_INIT_TRACING
 #define WPP_CLEANUP 
-#define TRACE_FLAG_SPBAPI 0
-#define TRACE_FLAG_WDFLOADING 0
+#define TRACE_FLAG_SPBAPI 1
+#define TRACE_FLAG_WDFLOADING 1
 
 // begin_wpp config
 // FUNC FuncEntry{LEVEL=TRACE_LEVEL_VERBOSE}(FLAGS);

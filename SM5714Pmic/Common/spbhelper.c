@@ -65,3 +65,64 @@ NTSTATUS update_reg(
 
     return status;
 }
+
+NTSTATUS write_reg8(
+    PDEVICE_CONTEXT pDevice,
+    unsigned long   spbIndex,
+    unsigned char   reg,
+    unsigned char   data
+)
+{
+    unsigned char buf[2];
+
+    buf[0] = reg;
+    buf[1] = data;
+
+    SPB_CONTEXT* spbCtx = &pDevice->SpbContexts[spbIndex];
+    return SpbWriteDataSynchronously(spbCtx, buf, sizeof(buf));
+}
+
+NTSTATUS read_reg8(
+    PDEVICE_CONTEXT pDevice,
+    unsigned long   spbIndex,
+    unsigned char   reg,
+    unsigned char*  data
+)
+{
+    NTSTATUS status;
+    unsigned char reg_addr = reg;
+    unsigned char read_buf[1];
+
+    SPB_CONTEXT* spbCtx = &pDevice->SpbContexts[spbIndex];
+    status = SpbWriteRead(spbCtx, &reg_addr, sizeof(reg_addr),
+                          read_buf, sizeof(read_buf), 0);
+
+    if (NT_SUCCESS(status))
+        *data = read_buf[0];
+
+    return status;
+}
+
+NTSTATUS update_reg8(
+    PDEVICE_CONTEXT pDevice,
+    unsigned long   spbIndex,
+    unsigned char   reg,
+    unsigned char   mask,
+    unsigned char   val
+)
+{
+    NTSTATUS status;
+    unsigned char current;
+    unsigned char new_val;
+
+    status = read_reg8(pDevice, spbIndex, reg, &current);
+    if (!NT_SUCCESS(status))
+        return status;
+
+    new_val = (current & ~mask) | (val & mask);
+
+    if (current == new_val)
+        return STATUS_SUCCESS;
+
+    return write_reg8(pDevice, spbIndex, reg, new_val);
+}
