@@ -46,13 +46,24 @@ typedef struct _DEVICE_CONTEXT
 	ULONG                           InputCurrentLimit;   // mA
 	ULONG                           ChargingCurrent;     // mA
 	ULONG                           TopoffCurrent;       // mA
+	ULONG                           FloatVoltage;        // mV (float charge voltage)
+	ULONG                           OtgCurrent;          // mA (900, 1200, 1500)
+	ULONG                           TrickleCurrent;      // mA (trickle charge current)
+	UCHAR                           WdtTimer;            // WDT timeout index
+	UCHAR                           LxSlope;             // LX slope 0-3
+	BOOLEAN                         AiclEnabled;         // Auto input current limit
+	UCHAR                           DischgLimit;         // Discharge OCP limit index
+	UCHAR                           TopoffTimer;         // Topoff timer index
+
+	// Runtime charging state
+	BOOLEAN                         IsChargingEnabled;
+	UCHAR                           ChgStatus;           // CHG_STATUS1 snapshot
+	ULONG                           RpCurrentAdvertised; // mA from CC advertisement
 
 	// Type-C state
 	UCHAR                           AttachType;          // SM5714_ATTACH_xxx
 	UCHAR                           CcOrientation;       // 0=CC1, 1=CC2, 2=Open
-	BOOLEAN                         VbusPresent;
-	BOOLEAN                         IsAttached;
-
+    UCHAR                           Bc12Type;            // BC1.2 detected type
 } DEVICE_CONTEXT, *PDEVICE_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT, GetDeviceContext)

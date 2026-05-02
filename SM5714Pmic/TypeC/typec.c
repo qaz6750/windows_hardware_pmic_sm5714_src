@@ -6,7 +6,7 @@
 #include <acpiioct.h>
 
 static ULONG DebugLevel = 100;
-static ULONG DebugCatagories = DBG_INIT || DBG_PNP || DBG_IOCTL;
+static ULONG DebugCategories = DBG_INIT || DBG_PNP || DBG_IOCTL;
 
 //
 // Set SM5714 MUIC D+/D- analog switch to USB mode or OPEN.
@@ -18,7 +18,7 @@ static ULONG DebugCatagories = DBG_INIT || DBG_PNP || DBG_IOCTL;
 //
 // Android equivalent: com_to_usb() / com_to_open() in sm5714-muic.c
 //
-static NTSTATUS muic_set_usb_path(_In_ PDEVICE_CONTEXT pDevice, _In_ bool connect)
+static NTSTATUS muic_set_usb_path(_In_ PDEVICE_CONTEXT pDevice, _In_ BOOLEAN connect)
 {
     if (pDevice->SpbContextCount < 3)
     {
@@ -206,14 +206,42 @@ static NTSTATUS typec_process_attach(_In_ PDEVICE_CONTEXT pDevice)
     if (attach_type == SM5714_ATTACH_SOURCE)
     {
         // We are Sink (charger cable connected)
-        // Set data role UFP, power role Sink
         update_reg8(pDevice, idx, SM5714_REG_PD_CNTL2, 0x03, 0x00);
 
-        // Keep charger in normal charging mode
         typec_set_otg_mode(pDevice, false);
 
+        // Adapt input current based on RP advertisement
+        ChargerAdaptRpCurrent(pDevice);
+
         // Enable charging from VBUS
-        enable_charging(pDevice, true);
+        ChargerEnable(pDevice, true);
+
+        // Read and log charger status
+        ChargerReadStatus(pDevice);
+
+        //
+        // Detect BC1.2 charger type (DCP / CDP / SDP)
+        //
+        {
+            UCHAR bc12;
+            if (NT_SUCCESS(ChargerDetectBc12(pDevice, &bc12))) {
+                pDevice->Bc12Type = bc12;
+            }
+        }
+
+        //
+        // Issue USB PD sink PDO request if PD-capable cable detected.
+        // The SM5714 PD block handles negotiation autonomously after
+        // receiving our sink capabilities.
+        //
+        {
+            UCHAR pd_state = 0;
+            if (NT_SUCCESS(read_reg8(pDevice, idx,
+                         SM5714_REG_PD_STATE0, &pd_state))) {
+                Print(DEBUG_LEVEL_VERBOSE, DBG_IOCTL,
+                      "PD state: 0x%02x\n", pd_state);
+            }
+        }
 
         Print(DEBUG_LEVEL_INFO, DBG_IOCTL, "Role: Sink (UFP)\n");
     }
@@ -224,7 +252,7 @@ static NTSTATUS typec_process_attach(_In_ PDEVICE_CONTEXT pDevice)
         update_reg8(pDevice, idx, SM5714_REG_PD_CNTL2, 0x03, 0x03);
 
         // Disable charging before entering OTG boost mode
-        enable_charging(pDevice, false);
+        ChargerEnable(pDevice, false);
 
         // Enable OTG VBUS output
         typec_set_otg_mode(pDevice, true);
@@ -261,7 +289,7 @@ static NTSTATUS typec_process_detach(_In_ PDEVICE_CONTEXT pDevice)
         typec_set_otg_mode(pDevice, false);
 
         // Re-enable charging after exiting OTG mode
-        enable_charging(pDevice, true);
+        ChargerEnable(pDevice, true);
     }
 
     pDevice->IsAttached = FALSE;
@@ -394,7 +422,7 @@ NTSTATUS typec_process_interrupt(_In_ PDEVICE_CONTEXT pDevice)
 // OTG disable sequence:
 //   1. Set CNTL2: OP_MODE=CHG_ON_VBUS (bits[3:0]=0x5)
 //
-NTSTATUS typec_set_otg_mode(_In_ PDEVICE_CONTEXT pDevice, _In_ bool enable)
+NTSTATUS typec_set_otg_mode(_In_ PDEVICE_CONTEXT pDevice, _In_ BOOLEAN enable)
 {
     NTSTATUS status;
 

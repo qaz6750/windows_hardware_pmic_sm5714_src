@@ -5,6 +5,16 @@
 // Charger Register definitions
 //
 enum chg_status_regs {
+    SM5714_CHG_REG_INT1        = 0x01,
+    SM5714_CHG_REG_INT2        = 0x02,
+    SM5714_CHG_REG_INT3        = 0x03,
+    SM5714_CHG_REG_INT4        = 0x04,
+    SM5714_CHG_REG_INT5        = 0x05,
+    SM5714_CHG_REG_INTMSK1     = 0x06,
+    SM5714_CHG_REG_INTMSK2     = 0x07,
+    SM5714_CHG_REG_INTMSK3     = 0x08,
+    SM5714_CHG_REG_INTMSK4     = 0x09,
+    SM5714_CHG_REG_INTMSK5     = 0x0A,
     SM5714_CHG_REG_STATUS1      = 0x0D,
     SM5714_CHG_REG_STATUS2      = 0x0E,
     SM5714_CHG_REG_STATUS3      = 0x0F,
@@ -16,11 +26,104 @@ enum chg_cntl_regs {
     SM5714_CHG_REG_CNTL1 = 0x13,
     SM5714_CHG_REG_CNTL2 = 0x14,       // OP_MODE register (bits [3:0])
     SM5714_CHG_REG_VBUSCNTL = 0x15,
+    SM5714_CHG_REG_CHGCNTL1 = 0x17,
     SM5714_CHG_REG_CHGCNTL2 = 0x18,
-    SM5714_CHG_REG_CHGCNTL4 = 0x1A,
-    SM5714_CHG_REG_CHGCNTL5 = 0x1B,
+    SM5714_CHG_REG_CHGCNTL3 = 0x19,    // Trickle charging current
+    SM5714_CHG_REG_CHGCNTL4 = 0x1A,    // BATREG (float voltage) + AUTOSTOP
+    SM5714_CHG_REG_CHGCNTL5 = 0x1B,    // Topoff current
+    SM5714_CHG_REG_CHGCNTL6 = 0x1C,    // Discharge current limit (OCP)
+    SM5714_CHG_REG_CHGCNTL7 = 0x1D,    // Topoff timer
+    SM5714_CHG_REG_CHGCNTL8 = 0x1E,    // LX slope control
+    SM5714_CHG_REG_WDTCNTL  = 0x22,    // Watchdog timer control
     SM5714_CHG_REG_BSTCNTL1 = 0x23,    // BSTOUT[3:0] + OTG_CURRENT[7:6]
+    SM5714_CHG_REG_FACTORY1  = 0x25,   // Factory / Bypass control
+    SM5714_CHG_REG_FACTORY2  = 0x26,
+    SM5714_CHG_REG_CHGCNTL11 = 0x46,   // AICL threshold + Ship mode control
+    SM5714_CHG_REG_DEVICEID  = 0x50,
 };
+
+//
+// Charger STATUS1 bit masks
+//
+#define CHG_STAT1_VBUSPOK      (1 << 0)
+#define CHG_STAT1_VBUSOVP      (1 << 1)
+#define CHG_STAT1_VSYSUVLO     (1 << 2)
+#define CHG_STAT1_THERMAL_SD   (1 << 3)
+#define CHG_STAT1_OTGFAIL      (1 << 5)
+#define CHG_STAT1_SFTMEXP      (1 << 6)
+#define CHG_STAT1_BATOVP       (1 << 7)
+
+//
+// Charger STATUS2 bit masks
+//
+#define CHG_STAT2_TOPOFF       (1 << 5)
+#define CHG_STAT2_DONE         (1 << 4)
+#define CHG_STAT2_CHG_ON       (1 << 3)
+#define CHG_STAT2_BATTERY_PRES (1 << 2)
+#define CHG_STAT2_AICL_FAIL    (1 << 6)
+#define CHG_STAT2_WDT_EXP      (1 << 7)
+
+//
+// Charger CNTL1 bit masks
+//
+#define CHG_CNTL1_ENQ4FET      (1 << 3)   // Enable charging FET
+#define CHG_CNTL1_AICLEN_VBUS  (1 << 6)   // AICL enable for VBUS
+
+//
+// Charger CHGCNTL4 bit masks
+//
+#define CHG_BATREG_MASK         0x3F      // Bits [5:0]: float voltage
+#define CHG_AUTOSTOP_MASK       (1 << 6)  // Bit 6: autostop
+
+//
+// Charger CHGCNTL6 bit masks (Discharge current limit)
+//
+#define CHG_DISCHG_LIMIT_MASK   (0x7 << 1)  // Bits [3:1]
+
+//
+// Charger CHGCNTL7 bit masks (Topoff timer)
+//
+#define CHG_TOPOFF_TMR_MASK     (0x3 << 3)  // Bits [4:3]
+
+//
+// Charger CHGCNTL8 bit masks (LX slope)
+//
+#define CHG_LXSLOPE_MASK        0x03       // Bits [1:0]
+
+//
+// Watchdog timer control (WDTCNTL)
+//
+#define WDT_ENABLE              (1 << 0)
+#define WDT_TIMER_MASK          (0x3 << 1)  // Bits [2:1]
+#define WDT_KICK                (1 << 3)
+#define WDT_EXP_CLEAR           (1 << 6)
+
+//
+// AICL threshold (CHGCNTL11)
+//
+#define AICL_TH_MASK            (0x3 << 6)  // Bits [7:6]
+
+//
+// Ship mode control (CHGCNTL11)
+//
+#define SHIP_FORCED             (1 << 5)
+#define SHIP_AUTO_TIME_MASK     (0x3 << 3)  // Bits [4:3]
+#define SHIP_AUTO_VREF_MASK     (0x3 << 1)  // Bits [2:1]
+
+//
+// Factory control (FACTORY1 bit masks)
+//
+#define FACTORY1_BYPASS_MODE    (1 << 7)    // Bypass / factory mode enable
+
+//
+// Trickle current (CHGCNTL3)
+//
+#define CHG_TRICKLE_MASK        0xFF        // Bits [7:0]: trickle charge current
+
+//
+// Reset control (SYS_CNTL)
+//
+#define SYS_CNTL_SWRST          (1 << 7)    // Software reset
 
 //
 // Charger operation modes (CNTL2 bits [3:0])
@@ -175,5 +278,123 @@ enum typec_usbpd_reg {
 
 #define USBPD_ENABLED_INT3   (SM5714_INT_STATUS3_WATER | \
                               SM5714_INT_STATUS3_WATER_RLS)
+
+//
+// Charger interrupt bit masks (CHG_REG_INT1-5)
+//
+#define CHG_INT1_VBUSLIMIT     (1 << 0)
+#define CHG_INT1_VBUSOVP       (1 << 1)
+#define CHG_INT1_VBUSUVLO      (1 << 2)
+#define CHG_INT1_VBUSPOK       (1 << 3)
+
+#define CHG_INT2_WDTMROFF      (1 << 0)
+#define CHG_INT2_DONE          (1 << 1)
+#define CHG_INT2_TOPOFF        (1 << 2)
+#define CHG_INT2_Q4FULLON      (1 << 3)
+#define CHG_INT2_CHGON         (1 << 4)
+#define CHG_INT2_NOBAT         (1 << 5)
+#define CHG_INT2_BATOVP        (1 << 6)
+#define CHG_INT2_AICL          (1 << 7)
+
+#define CHG_INT3_VSYSOVP       (1 << 0)
+#define CHG_INT3_nENQ4         (1 << 3)
+#define CHG_INT3_OTGFAIL       (1 << 4)
+#define CHG_INT3_THEMREG       (1 << 5)
+
+#define CHG_INT4_CVMODE        (1 << 0)
+#define CHG_INT4_BOOSTPOK      (1 << 1)
+#define CHG_INT4_BOOSTPOK_NG   (1 << 2)
+
+#define CHG_INT5_ABSTMROFF     (1 << 0)
+#define CHG_INT5_FLEDOPEN      (1 << 1)
+#define CHG_INT5_FLEDSHORT     (1 << 2)
+
+//
+// Charger IRQ mask values (0 = enabled, 1 = masked)
+//
+#define CHG_INT1_MASK_VALUE    ((UCHAR)~(CHG_INT1_VBUSPOK | \
+                                         CHG_INT1_VBUSOVP | \
+                                         CHG_INT1_VBUSUVLO))
+#define CHG_INT2_MASK_VALUE    ((UCHAR)~(CHG_INT2_DONE  | \
+                                         CHG_INT2_TOPOFF | \
+                                         CHG_INT2_CHGON  | \
+                                         CHG_INT2_NOBAT  | \
+                                         CHG_INT2_BATOVP | \
+                                         CHG_INT2_AICL))
+#define CHG_INT3_MASK_VALUE    ((UCHAR)~(CHG_INT3_OTGFAIL | CHG_INT3_THEMREG))
+#define CHG_INT4_MASK_VALUE    0xFF
+#define CHG_INT5_MASK_VALUE    0xFF
+
+//
+// MUIC registers (I2C addr 0x4A >> 1 = 0x25)
+//
+enum muic_regs {
+    SM5714_MUIC_REG_DEVICEID     = 0x00,
+    SM5714_MUIC_REG_INT1         = 0x01,
+    SM5714_MUIC_REG_INT2         = 0x02,
+    SM5714_MUIC_REG_INTMASK1     = 0x03,
+    SM5714_MUIC_REG_INTMASK2     = 0x04,
+    SM5714_MUIC_REG_CNTL         = 0x05,
+    SM5714_MUIC_REG_MANUAL_SW    = 0x06,
+    SM5714_MUIC_REG_DEVICETYPE1  = 0x07,
+    SM5714_MUIC_REG_DEVICETYPE2  = 0x08,
+    SM5714_MUIC_REG_AFCCNTL      = 0x09,
+    SM5714_MUIC_REG_AFCTXD       = 0x0A,
+    SM5714_MUIC_REG_AFCSTATUS    = 0x0B,
+    SM5714_MUIC_REG_VBUS_VOLTAGE = 0x0C,
+    SM5714_MUIC_REG_RESET        = 0x1E,
+};
+
+//
+// DEVICETYPE1 values (BC1.2 + proprietary)
+//
+#define MUIC_DEVTYPE1_DCP         (1 << 0)
+#define MUIC_DEVTYPE1_CDP         (1 << 1)
+#define MUIC_DEVTYPE1_SDP         (1 << 2)
+#define MUIC_DEVTYPE1_OTG         (1 << 3)
+#define MUIC_DEVTYPE1_QC20_TA     (1 << 4)
+
+//
+// AFCCTRL register bits
+//
+#define MUIC_AFCCTRL_ENAFC        (1 << 0)
+#define MUIC_AFCCTRL_VBUS_READ    (1 << 1)
+#define MUIC_AFCCTRL_QC20_5V      0x00
+#define MUIC_AFCCTRL_QC20_9V      (1 << 6)
+#define MUIC_AFCCTRL_QC20_12V     (1 << 7)
+
+//
+// MUIC INT2 bits
+//
+#define MUIC_INT2_AFC_ACCEPTED    (1 << 0)
+#define MUIC_INT2_AFC_ERROR       (1 << 1)
+#define MUIC_INT2_VBUS_UPDATE     (1 << 2)
+
+//
+// BC1.2 device type (USBPD register 0x88)
+//
+#define BC12_TYPE_DCP             0x01
+#define BC12_TYPE_CDP             0x02
+#define BC12_TYPE_SDP             0x04
+#define BC12_TYPE_PROPRIETARY     0x08
+
+//
+// USB PD Sink PDOs from DTS config:
+//   max_power=5000mW, max_voltage=6000mV, max_current=2000mA
+//
+#define PD_SINK_PDO_5V_500MA     0x0001912C
+#define PD_SINK_PDO_5V_1500MA    0x0002F12C
+#define PD_SINK_PDO_5V_2000MA    0x0003E12C
+#define PD_SINK_PDO_9V_1500MA    0x0002F164
+#define PD_SINK_PDO_9V_2000MA    0x0003E164
+
+//
+// USB PD control
+//
+#define PD_CNTL1_SEND_PDO         (1 << 0)
+#define PD_CNTL2_DATA_ROLE_UFP    0x00
+#define PD_CNTL2_DATA_ROLE_DFP    0x03
+#define PD_CNTL2_POWER_ROLE_SINK  0x00
+#define PD_CNTL2_POWER_ROLE_SRC   0x0C
 
 #endif

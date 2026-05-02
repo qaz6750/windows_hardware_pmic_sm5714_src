@@ -10,8 +10,9 @@ static ULONG DebugCatagories = DBG_INIT || DBG_PNP || DBG_IOCTL;
 #define GET_INTEGER(_arg_) (*(PULONG UNALIGNED)((_arg_)->Data))
 
 //
-// ISR for charger interrupt (GPIO 54) - currently not used
+// ISR for charger interrupt (GPIO 54)
 // Runs at PASSIVE_LEVEL due to PassiveHandling = TRUE.
+// Reads CHG INT1-5 registers and logs charger state changes.
 //
 BOOLEAN
 EvtChgInterruptIsr(
@@ -19,11 +20,32 @@ EvtChgInterruptIsr(
     _In_ ULONG MessageID
 )
 {
-    UNREFERENCED_PARAMETER(Interrupt);
     UNREFERENCED_PARAMETER(MessageID);
 
-    // Charger interrupt: acknowledge only.
-    // Charger state is managed through TypeC events.
+    PDEVICE_CONTEXT pDevice = GetDeviceContext(
+        WdfInterruptGetDevice(Interrupt));
+
+    if (pDevice->SpbContextCount < 1) {
+        return FALSE;
+    }
+
+    if (!pDevice->DevicePoweredOn) {
+        //
+        // Must still read INT registers to deassert the line.
+        //
+        UCHAR dummy;
+        read_reg8(pDevice, SPB_CHARGER_INDEX, SM5714_CHG_REG_INT1, &dummy);
+        read_reg8(pDevice, SPB_CHARGER_INDEX, SM5714_CHG_REG_INT2, &dummy);
+        read_reg8(pDevice, SPB_CHARGER_INDEX, SM5714_CHG_REG_INT3, &dummy);
+        read_reg8(pDevice, SPB_CHARGER_INDEX, SM5714_CHG_REG_INT4, &dummy);
+        read_reg8(pDevice, SPB_CHARGER_INDEX, SM5714_CHG_REG_INT5, &dummy);
+        return TRUE;
+    }
+
+    WdfWaitLockAcquire(pDevice->DataLock, NULL);
+    ChargerProcessInterrupts(pDevice);
+    WdfWaitLockRelease(pDevice->DataLock);
+
     return TRUE;
 }
 
@@ -84,6 +106,7 @@ FetchPmicConfig(
     input.Signature = ACPI_EVAL_INPUT_BUFFER_SIGNATURE;
     memcpy(input.MethodName, "PMIC", 4);
 
+    // Support up to 8 ACPI arguments
     const ULONG outLen =
         sizeof(ACPI_EVAL_OUTPUT_BUFFER) + 8 * sizeof(ACPI_METHOD_ARGUMENT);
 
@@ -115,10 +138,36 @@ FetchPmicConfig(
         output->Argument[2].Type == ACPI_METHOD_ARGUMENT_INTEGER &&
         output->Argument[3].Type == ACPI_METHOD_ARGUMENT_INTEGER)
     {
-        DevCtx->Autostop = GET_INTEGER(&output->Argument[0]) ? TRUE : FALSE;
-        DevCtx->InputCurrentLimit = GET_INTEGER(&output->Argument[1]);
-        DevCtx->ChargingCurrent = GET_INTEGER(&output->Argument[2]);
-        DevCtx->TopoffCurrent = GET_INTEGER(&output->Argument[3]);
+        // Arguments 0-3: basic charging (required)
+        DevCtx->Autostop           = GET_INTEGER(&output->Argument[0]) ? TRUE : FALSE;
+        DevCtx->InputCurrentLimit  = GET_INTEGER(&output->Argument[1]);
+        DevCtx->ChargingCurrent    = GET_INTEGER(&output->Argument[2]);
+        DevCtx->TopoffCurrent      = GET_INTEGER(&output->Argument[3]);
+
+        // Arguments 4-7: advanced charging (optional, use defaults)
+        DevCtx->FloatVoltage       = 4350;  // Default: 4.35V
+        DevCtx->WdtTimer           = 2;     // Default: 40s
+        DevCtx->AiclEnabled        = FALSE;
+        DevCtx->DischgLimit        = 3;     // Default: 3.5A
+        DevCtx->TopoffTimer        = 0;     // Default: 15min
+        DevCtx->LxSlope            = 0;     // Default: 0.45V/μs
+        DevCtx->TrickleCurrent     = 450;   // Default: 450mA
+
+        if (output->Count >= 5 &&
+            output->Argument[4].Type == ACPI_METHOD_ARGUMENT_INTEGER)
+            DevCtx->FloatVoltage = GET_INTEGER(&output->Argument[4]);
+
+        if (output->Count >= 6 &&
+            output->Argument[5].Type == ACPI_METHOD_ARGUMENT_INTEGER)
+            DevCtx->WdtTimer = (UCHAR)GET_INTEGER(&output->Argument[5]);
+
+        if (output->Count >= 7 &&
+            output->Argument[6].Type == ACPI_METHOD_ARGUMENT_INTEGER)
+            DevCtx->AiclEnabled = GET_INTEGER(&output->Argument[6]) ? TRUE : FALSE;
+
+        if (output->Count >= 8 &&
+            output->Argument[7].Type == ACPI_METHOD_ARGUMENT_INTEGER)
+            DevCtx->DischgLimit = (UCHAR)GET_INTEGER(&output->Argument[7]);
     }
     else
     {
@@ -318,25 +367,63 @@ Status
     }
 
     Print(DEBUG_LEVEL_INFO, DBG_INIT,
-        "PMIC cfg: Autostop=%s  ICL=%lu mA  ICHG=%lu mA  TOP=%lu mA\n",
+        "PMIC cfg:\n"
+        "  Autostop=%s  FloatV=%lu mV  ICL=%lu mA  ICHG=%lu mA\n"
+        "  Topoff=%lu mA  Trickle=%lu mA  WDT=%u  AICL=%s\n"
+        "  DischgOCP=%u  TopoffTmr=%u  LXslope=%u\n",
         pDevice->Autostop ? "ON" : "OFF",
+        pDevice->FloatVoltage,
         pDevice->InputCurrentLimit,
         pDevice->ChargingCurrent,
-        pDevice->TopoffCurrent);
+        pDevice->TopoffCurrent,
+        pDevice->TrickleCurrent,
+        pDevice->WdtTimer,
+        pDevice->AiclEnabled ? "ON" : "OFF",
+        pDevice->DischgLimit,
+        pDevice->TopoffTimer,
+        pDevice->LxSlope);
 
     // Configure charging
-    status = charger_probe(pDevice);
+    status = ChargerProbe(pDevice);
     if (!NT_SUCCESS(status))
     {
-        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL, "Error configuring charging settings - %!STATUS!", status);
+        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+              "Charger probe failed - %!STATUS!", status);
         goto exit;
     }
-    else {
-        Print(DEBUG_LEVEL_INFO, DBG_INIT, "Charger parameters configured sucessfully!\n");
+
+    //
+    // Set up charger interrupt masks.
+    // 0 = enabled, 1 = masked (inverted logic).
+    //
+    write_reg8(pDevice, SPB_CHARGER_INDEX,
+               SM5714_CHG_REG_INTMSK1, CHG_INT1_MASK_VALUE);
+    write_reg8(pDevice, SPB_CHARGER_INDEX,
+               SM5714_CHG_REG_INTMSK2, CHG_INT2_MASK_VALUE);
+    write_reg8(pDevice, SPB_CHARGER_INDEX,
+               SM5714_CHG_REG_INTMSK3, CHG_INT3_MASK_VALUE);
+    write_reg8(pDevice, SPB_CHARGER_INDEX,
+               SM5714_CHG_REG_INTMSK4, CHG_INT4_MASK_VALUE);
+    write_reg8(pDevice, SPB_CHARGER_INDEX,
+               SM5714_CHG_REG_INTMSK5, CHG_INT5_MASK_VALUE);
+
+    // Clear any pending charger interrupts
+    {
+        UCHAR dummy;
+        read_reg8(pDevice, SPB_CHARGER_INDEX,
+                  SM5714_CHG_REG_INT1, &dummy);
+        read_reg8(pDevice, SPB_CHARGER_INDEX,
+                  SM5714_CHG_REG_INT2, &dummy);
+        read_reg8(pDevice, SPB_CHARGER_INDEX,
+                  SM5714_CHG_REG_INT3, &dummy);
+        read_reg8(pDevice, SPB_CHARGER_INDEX,
+                  SM5714_CHG_REG_INT4, &dummy);
+        read_reg8(pDevice, SPB_CHARGER_INDEX,
+                  SM5714_CHG_REG_INT5, &dummy);
     }
 
     // Enable charging
-    status = enable_charging(pDevice, true);
+    status = ChargerEnable(pDevice, true);
     if (!NT_SUCCESS(status))
     {
         Print(DEBUG_LEVEL_ERROR, DBG_IOCTL, "Error enabling charging - %!STATUS!", status);
@@ -415,7 +502,7 @@ Status
         if (pDevice->AttachType == 0x02)
             typec_set_otg_mode(pDevice, false);
 
-        enable_charging(pDevice, false);
+        ChargerEnable(pDevice, false);
     }
 
     if (pDevice->DataLock != NULL)
