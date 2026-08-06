@@ -26,5 +26,11 @@ sm5714_Get_BatteryVoltage(
 NTSTATUS
 sm5714_Get_BatteryCurrent(
 	PSM5714_BATTERY_FDO_DATA DevExt,
-	PULONG Current
+	PLONG Current
+);
+
+NTSTATUS
+sm5714_Get_BatteryHealth(
+	PSM5714_BATTERY_FDO_DATA DevExt,
+	PULONG Soh
 );

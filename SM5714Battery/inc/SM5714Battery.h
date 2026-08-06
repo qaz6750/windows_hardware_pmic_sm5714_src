@@ -112,6 +112,7 @@ typedef struct {
     ULONG                           FullChargedCapacity_mWh;
     UCHAR                           BatteryTechnology;
     ULONG                           DesignVoltage_mV;
+    ULONG                           BatterySoh;         /* State-of-Health, 0-100 % */
 } SM5714_BATTERY_FDO_DATA, *PSM5714_BATTERY_FDO_DATA;
 
 //------------------------------------------------------ WDF Context Declaration

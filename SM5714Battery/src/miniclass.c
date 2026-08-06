@@ -175,7 +175,8 @@ Return Value:
 NTSTATUS
 SM5714BatteryQueryBatteryInformation(PSM5714_BATTERY_FDO_DATA DevExt, PBATTERY_INFORMATION BatteryInformationResult)
 {
-	ULONG    CycleCount;
+	ULONG    CycleCount = 0;
+	ULONG    Soh;
 	NTSTATUS Status;
 
 	Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE, "Entering %!FUNC!\n");
@@ -188,6 +189,21 @@ SM5714BatteryQueryBatteryInformation(PSM5714_BATTERY_FDO_DATA DevExt, PBATTERY_I
 	RtlCopyMemory(BatteryInformationResult->Chemistry, LION, 4);
 
 	BatteryInformationResult->DesignedCapacity = DevExt->DesignedCapacity_mWh;
+
+	/*
+	 * Update FullChargedCapacity using the FG's State-of-Health.
+	 * SOH represents battery aging: 100 % = brand-new, lower = degraded.
+	 * This gives Windows an accurate picture of current capacity so that
+	 * the charge percentage and time-to-empty estimates stay correct as the
+	 * battery ages.
+	 */
+	Status = sm5714_Get_BatteryHealth(DevExt, &Soh);
+	if (NT_SUCCESS(Status) && Soh > 0 && Soh <= 100) {
+		DevExt->BatterySoh = Soh;
+		DevExt->FullChargedCapacity_mWh =
+		    DevExt->DesignedCapacity_mWh * Soh / 100;
+	}
+
 	BatteryInformationResult->FullChargedCapacity = DevExt->FullChargedCapacity_mWh;
 
 	BatteryInformationResult->DefaultAlert1 = BatteryInformationResult->FullChargedCapacity * 7 / 100; // 7% of total capacity for error
@@ -220,7 +236,6 @@ SM5714BatteryQueryBatteryInformation(PSM5714_BATTERY_FDO_DATA DevExt, PBATTERY_I
 		BatteryInformationResult->CycleCount);
 
 	Status = STATUS_SUCCESS;
-Exit:
 	Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE, "Leaving %!FUNC!: Status = 0x%08lX\n", Status);
 	return Status;
 }
@@ -235,10 +250,11 @@ SM5714BatteryQueryBatteryEstimatedTime(
 	NTSTATUS Status = STATUS_SUCCESS;
 	ULONG Capacity = 0;
 	ULONG Voltage = 0;
-	int Current = 0;
+	LONG Current = 0;
 	LONG Rate_mW = 0;
 	ULONG AbsRate_mW = 0;
 	ULONG RemainingCapacity_mWh = 0;
+	ULONGLONG RemainingCapacitySeconds = 0;
 
 	Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE, "Entering %!FUNC!\n");
 
@@ -265,7 +281,7 @@ SM5714BatteryQueryBatteryEstimatedTime(
 			goto Exit;
 		}
 
-		Status = sm5714_Get_BatteryCurrent(DevExt, (PULONG)&Current);
+		Status = sm5714_Get_BatteryCurrent(DevExt, &Current);
 		if (!NT_SUCCESS(Status))
 		{
 			*ResultValue = BATTERY_UNKNOWN_TIME;
@@ -296,10 +312,12 @@ SM5714BatteryQueryBatteryEstimatedTime(
 	}
 
 	/* remaining_mWh = SOC(0.1%) * FullChargedCapacity_mWh / 1000 */
-	RemainingCapacity_mWh = (ULONG)Capacity * DevExt->FullChargedCapacity_mWh / 1000;
+	RemainingCapacity_mWh = (ULONG)(((ULONGLONG)Capacity *
+		DevExt->FullChargedCapacity_mWh) / 1000);
 
 	/* time_seconds = remaining_mWh * 3600 / rate_mW */
-	*ResultValue = (RemainingCapacity_mWh * 3600) / AbsRate_mW;
+	RemainingCapacitySeconds = (ULONGLONG)RemainingCapacity_mWh * 3600;
+	*ResultValue = (ULONG)(RemainingCapacitySeconds / AbsRate_mW);
 
 	Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE,
 		"BatteryEstimatedTime: Remaining=%d mWh, DrainRate=%d mW, Time=%d seconds\n",
@@ -523,7 +541,7 @@ Return Value:
 
 	case BatteryGranularityInformation:
 
-		ReportingScale.Capacity = DevExt->DesignVoltage_mV;
+		ReportingScale.Capacity = DevExt->DesignedCapacity_mWh;
 		ReportingScale.Granularity = 1;
 
 		Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE, "BATTERY_REPORTING_SCALE: Capacity: %d, Granularity: %d\n", ReportingScale.Capacity, ReportingScale.Granularity);
@@ -656,9 +674,6 @@ Return Value:
 {
 	PSM5714_BATTERY_FDO_DATA DevExt;
 	NTSTATUS Status;
-	INT16 Rate = 0;
-	UCHAR Flags = 0;
-
 	Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE, "Entering %!FUNC!\n");
 	PAGED_CODE();
 
@@ -671,15 +686,24 @@ Return Value:
 
 	// Fetch State of Charge
 	unsigned int     Capacity = 0;
-	sm5714_Get_BatterySoC(DevExt, &Capacity);
+	Status = sm5714_Get_BatterySoC(DevExt, &Capacity);
+	if (!NT_SUCCESS(Status)) {
+		goto QueryStatusEnd;
+	}
 
 	// Fetch Voltage(mV)
 	unsigned int     Voltage = 0;
-	sm5714_Get_BatteryVoltage(DevExt, &Voltage);
+	Status = sm5714_Get_BatteryVoltage(DevExt, &Voltage);
+	if (!NT_SUCCESS(Status)) {
+		goto QueryStatusEnd;
+	}
 
 	// Fetch Current (mA) over I2C
-	int     Current = 0;
-	sm5714_Get_BatteryCurrent(DevExt, &Current);
+	LONG Current = 0;
+	Status = sm5714_Get_BatteryCurrent(DevExt, &Current);
+	if (!NT_SUCCESS(Status)) {
+		goto QueryStatusEnd;
+	}
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "CURRENT: %d mA\n", Current);
 
 	//
@@ -703,11 +727,12 @@ Return Value:
 	 */
 
 	// mW
-	BatteryStatus->Capacity = (ULONG)Capacity * DevExt->FullChargedCapacity_mWh / (ULONG)1000;
+	BatteryStatus->Capacity = (ULONG)(((ULONGLONG)Capacity *
+		DevExt->FullChargedCapacity_mWh) / 1000);
 	// mV
 	BatteryStatus->Voltage = (ULONG)Voltage;
 	// mW (Signed)
-	BatteryStatus->Rate = (((LONG)Current * (LONG)Voltage) / (LONG)1000);
+	BatteryStatus->Rate = (LONG)(((LONGLONG)Current * Voltage) / 1000);
 
 	// Debug: Print final BatteryStatus
 	Trace(
