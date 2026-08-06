@@ -51,6 +51,7 @@ int ChargerSetTrickleCurrent(_In_ PDEVICE_CONTEXT pDevice, unsigned int mA);
 //
 NTSTATUS ChargerReadStatus(_In_ PDEVICE_CONTEXT pDevice);
 int ChargerAdaptRpCurrent(_In_ PDEVICE_CONTEXT pDevice);
+int ChargerApplyInputCurrentPolicy(_In_ PDEVICE_CONTEXT pDevice);
 int ChargerGetState(_In_ PDEVICE_CONTEXT pDevice);
 int ChargerSetBypass(_In_ PDEVICE_CONTEXT pDevice, BOOLEAN enable);
 int ChargerSetShipMode(_In_ PDEVICE_CONTEXT pDevice, BOOLEAN forced, UCHAR auto_vref, UCHAR auto_time);

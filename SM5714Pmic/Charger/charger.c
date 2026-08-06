@@ -5,9 +5,13 @@
 #include "..\Common\driver.h"
 
 static ULONG DebugLevel = 100;
-static ULONG DebugCategories = DBG_INIT || DBG_PNP || DBG_IOCTL;
+static ULONG DebugCategories = DBG_INIT | DBG_PNP | DBG_IOCTL;
 
 #define CHG_SPB SPB_CHARGER_INDEX
+#define CHG_INPUT_CURRENT_MIN_MA 100U
+#define CHG_INPUT_CURRENT_MAX_MA 3275U
+#define AICL_REDUCE_CURRENT_STEP_MA 100U
+#define AICL_MIN_INPUT_CURRENT_MA 300U
 
 // ---- Charge enable / disable ------------------------------------------------
 
@@ -19,6 +23,7 @@ ChargerEnable(
 {
     UCHAR mask;
     UCHAR val;
+    int   ret;
 
     mask = CHG_CNTL1_ENQ4FET;
 
@@ -30,8 +35,12 @@ ChargerEnable(
         Print(DEBUG_LEVEL_INFO, DBG_INIT, "Stop charging\n");
     }
 
-    pDevice->IsChargingEnabled = enable;
-    return update_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_CNTL1, mask, val);
+    ret = update_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_CNTL1, mask, val);
+    if (ret >= 0) {
+        pDevice->IsChargingEnabled = enable;
+    }
+
+    return ret;
 }
 
 // ---- Auto-stop (charge termination on full) ---------------------------------
@@ -69,10 +78,15 @@ ChargerSetInputCurrent(
 
     mask = 0x7F;
 
-    if (mA < 100) {
+    if (mA < CHG_INPUT_CURRENT_MIN_MA) {
         val = 0x00;
+    } else if (mA > CHG_INPUT_CURRENT_MAX_MA) {
+        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+              "Input current %u mA exceeds max %u mA, clamped\n",
+              mA, CHG_INPUT_CURRENT_MAX_MA);
+        val = 0x7F;
     } else {
-        val = ((mA - 100) / 25) & 0x7F;
+        val = (UCHAR)((mA - CHG_INPUT_CURRENT_MIN_MA) / 25);
     }
 
     return update_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_VBUSCNTL, mask, val);
@@ -105,7 +119,11 @@ ChargerSetChargeCurrent(
 }
 
 // ---- Float voltage (BATREG in CHGCNTL4) ------------------------------------
-//  Range: 3700 mV .. 4620 mV, 10 mV per LSB.
+//  Non-uniform three-range encoding (identical to Android chg_set_batreg):
+//    offset 0        : 3700 mV and below
+//    offset 1-3      : 3750 mV .. 3850 mV  in 50 mV steps
+//    offset 4-5      : 3900 mV .. 4000 mV  in 100 mV steps
+//    offset 6-63     : 4050 mV .. 4620 mV  in 10 mV steps
 
 int
 ChargerSetFloatVoltage(
@@ -118,12 +136,22 @@ ChargerSetFloatVoltage(
 
     mask = CHG_BATREG_MASK;
 
-    if (mV < 3700) {
+    if (mV <= 3700) {
         val = 0x00;
-    } else if (mV > 4620) {
-        val = 0x3F;
+    } else if (mV < 3900) {
+        /* 3750 / 3800 / 3850 -> offset 1 / 2 / 3 */
+        val = (UCHAR)((mV - 3700) / 50);
+    } else if (mV < 4050) {
+        /* 3900 / 4000 -> offset 4 / 5 */
+        val = (UCHAR)(((mV - 3900) / 100) + 4);
+    } else if (mV <= 4620) {
+        /* 4050 .. 4620 mV in 10 mV steps -> offset 6 .. 63 */
+        val = (UCHAR)(((mV - 4050) / 10) + 6);
     } else {
-        val = (UCHAR)((mV - 3700) / 10);
+        /* Clamp to maximum safe value 4.62 V */
+        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+              "Float voltage %u mV exceeds max 4620 mV, clamped\n", mV);
+        val = 0x3F;
     }
 
     Print(DEBUG_LEVEL_INFO, DBG_IOCTL,
@@ -139,6 +167,7 @@ ChargerGetFloatVoltage(
     UCHAR data;
     int   ret;
     int   mV;
+    int   offset;
 
     data = 0;
     ret  = read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_CHGCNTL4, &data);
@@ -146,7 +175,18 @@ ChargerGetFloatVoltage(
         return ret;
     }
 
-    mV = 3700 + ((int)(data & CHG_BATREG_MASK) * 10);
+    offset = (int)(data & CHG_BATREG_MASK);
+
+    if (offset == 0) {
+        mV = 3700;
+    } else if (offset <= 3) {
+        mV = 3700 + offset * 50;
+    } else if (offset <= 5) {
+        mV = 3900 + (offset - 4) * 100;
+    } else {
+        mV = 4050 + (offset - 6) * 10;
+    }
+
     return mV;
 }
 
@@ -201,7 +241,7 @@ ChargerSetTrickleCurrent(
 }
 
 // ---- Watchdog timer (WDTCNTL) ----------------------------------------------
-//  Timer values: 0 = 10 s, 1 = 20 s, 2 = 40 s, 3 = 80 s.
+//  Timer values: 0 = 30 s, 1 = 60 s, 2 = 90 s, 3 = 120 s.
 
 int
 ChargerSetWatchdogEnable(
@@ -242,7 +282,7 @@ ChargerSetWatchdogTimer(
     val  = (UCHAR)(timer_idx << 1);
 
     Print(DEBUG_LEVEL_INFO, DBG_IOCTL,
-          "WDT timeout: %u s\n", 10u << timer_idx);
+            "WDT timeout: %u s\n", 30u * (timer_idx + 1));
     return update_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_WDTCNTL, mask, val);
 }
 
@@ -266,7 +306,7 @@ ChargerClearWatchdog(
 
 // ---- AICL (automatic input current limit) ----------------------------------
 //  CNTL1[6]          : enable
-//  CHGCNTL11[7:6]    : threshold (0=4.35 V, 1=4.4 V, 2=4.5 V, 3=4.6 V)
+//  CHGCNTL11[7:6]    : threshold (0=4.3 V, 1=4.4 V, 2=4.5 V, 3=4.6 V)
 
 int
 ChargerSetAiclEnable(
@@ -321,7 +361,7 @@ ChargerSetSoftStart(
 }
 
 // ---- Battery discharge OCP (CHGCNTL6) --------------------------------------
-//  0=2.0 A .. 7=5.5 A (0.5 A steps).
+//  0=5.4 A .. 6=9.0 A (0.6 A steps), 7=disabled.
 
 int
 ChargerSetDischargeLimit(
@@ -343,7 +383,7 @@ ChargerSetDischargeLimit(
 }
 
 // ---- Top-off timer (CHGCNTL7) ----------------------------------------------
-//  0=15 min, 1=30 min, 2=45 min, 3=disabled.
+//  0=10 min, 1=20 min, 2=30 min, 3=45 min.
 
 int
 ChargerSetTopoffTimer(
@@ -365,7 +405,7 @@ ChargerSetTopoffTimer(
 }
 
 // ---- LX slope (CHGCNTL8) ---------------------------------------------------
-//  0=0.45 V/us, 1=0.3 V/us, 2=0.15 V/us, 3=0.1 V/us.
+//  0=1.58 V/ns, 1=3.00 V/ns, 2=4.38 V/ns, 3=5.43 V/ns.
 
 int
 ChargerSetLxSlope(
@@ -389,17 +429,25 @@ ChargerReadStatus(
     )
 {
     NTSTATUS status;
+    NTSTATUS read_status;
     UCHAR    s1, s2, s3, s4, s5;
+
+    s1 = s2 = s3 = s4 = s5 = 0;
 
     status = read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_STATUS1, &s1);
     if (!NT_SUCCESS(status)) {
         return status;
     }
 
-    read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_STATUS2, &s2);
-    read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_STATUS3, &s3);
-    read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_STATUS4, &s4);
-    read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_STATUS5, &s5);
+    read_status = read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_STATUS2, &s2);
+    if (NT_SUCCESS(status) && !NT_SUCCESS(read_status)) status = read_status;
+    read_status = read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_STATUS3, &s3);
+    if (NT_SUCCESS(status) && !NT_SUCCESS(read_status)) status = read_status;
+    read_status = read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_STATUS4, &s4);
+    if (NT_SUCCESS(status) && !NT_SUCCESS(read_status)) status = read_status;
+    read_status = read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_STATUS5, &s5);
+    if (NT_SUCCESS(status) && !NT_SUCCESS(read_status)) status = read_status;
+    if (!NT_SUCCESS(status)) return status;
 
     pDevice->ChgStatus = s1;
 
@@ -412,11 +460,11 @@ ChargerReadStatus(
     if (s1 & CHG_STAT1_VBUSOVP) {
         Print(DEBUG_LEVEL_ERROR, DBG_IOCTL, "  VBUS OVP!\n");
     }
-    if (s1 & CHG_STAT1_THERMAL_SD) {
-        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL, "  Thermal shutdown!\n");
+    if (s1 & CHG_STAT1_VBUSUVLO) {
+        Print(DEBUG_LEVEL_INFO, DBG_IOCTL, "  VBUS UVLO\n");
     }
-    if (s1 & CHG_STAT1_BATOVP) {
-        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL, "  Battery OVP!\n");
+    if (s1 & CHG_STAT1_VBUSLIMIT) {
+        Print(DEBUG_LEVEL_INFO, DBG_IOCTL, "  VBUS input limited\n");
     }
 
     if (s2 & CHG_STAT2_CHG_ON) {
@@ -428,14 +476,31 @@ ChargerReadStatus(
     if (s2 & CHG_STAT2_TOPOFF) {
         Print(DEBUG_LEVEL_VERBOSE, DBG_IOCTL, "  Top-off phase\n");
     }
-    if (s2 & CHG_STAT2_BATTERY_PRES) {
+    if (s2 & CHG_STAT2_NOBAT) {
+        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL, "  No battery!\n");
+    } else {
         Print(DEBUG_LEVEL_VERBOSE, DBG_IOCTL, "  Battery present\n");
     }
-    if (s2 & CHG_STAT2_AICL_FAIL) {
-        Print(DEBUG_LEVEL_INFO, DBG_IOCTL, "  AICL fail\n");
+    if (s2 & CHG_STAT2_BATOVP) {
+        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL, "  Battery OVP!\n");
+    }
+    if (s2 & CHG_STAT2_AICL) {
+        Print(DEBUG_LEVEL_INFO, DBG_IOCTL, "  AICL active\n");
     }
     if (s2 & CHG_STAT2_WDT_EXP) {
         Print(DEBUG_LEVEL_ERROR, DBG_IOCTL, "  WDT expired!\n");
+    }
+    if (s3 & CHG_STAT3_THERMSHDN) {
+        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL, "  Thermal shutdown!\n");
+    }
+    if (s3 & CHG_STAT3_THERMREG) {
+        Print(DEBUG_LEVEL_INFO, DBG_IOCTL, "  Thermal regulation active\n");
+    }
+    if (s3 & CHG_STAT3_OTGFAIL) {
+        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL, "  OTG boost fail!\n");
+    }
+    if (s3 & CHG_STAT3_VSYSOVP) {
+        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL, "  VSYS OVP!\n");
     }
 
     return STATUS_SUCCESS;
@@ -454,14 +519,14 @@ ChargerAdaptRpCurrent(
     UCHAR    cc_status;
 
     if (pDevice->SpbContextCount < 2) {
-        return -1;
+        return STATUS_DEVICE_NOT_READY;
     }
 
     cc_status = 0;
     status = read_reg8(pDevice, SPB_USBPD_INDEX, SM5714_REG_CC_STATUS,
                        &cc_status);
     if (!NT_SUCCESS(status)) {
-        return -1;
+        return status;
     }
 
     switch (cc_status & SM5714_CC_ADV_CURR) {
@@ -482,10 +547,63 @@ ChargerAdaptRpCurrent(
         Print(DEBUG_LEVEL_INFO, DBG_IOCTL,
               "ICL capped: %lu -> %lu mA (from RP)\n",
               pDevice->InputCurrentLimit, rp_ma);
-        ChargerSetInputCurrent(pDevice, rp_ma);
+        status = ChargerSetInputCurrent(pDevice, rp_ma);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
     }
 
-    return 0;
+    return STATUS_SUCCESS;
+}
+
+// ---- Apply combined input-current policy -----------------------------------
+//  Call after BC1.2 detection or RP-current change.
+//  Priority: ACPI-configured maximum > RP advertisement > BC1.2 type default.
+
+int
+ChargerApplyInputCurrentPolicy(
+    _In_ PDEVICE_CONTEXT pDevice
+    )
+{
+    ULONG icl;
+
+    /*
+     * Start from the per-charger-type maximum.
+     * BC1.2 bit mask values (may be OR-combined by the hardware):
+     *   0x01 = DCP,  0x02 = CDP,  0x04 = SDP,  0x08 = Proprietary
+     * Give priority to the highest-capability type detected.
+     */
+    if (pDevice->Bc12Type & BC12_TYPE_DCP) {
+        icl = 2000;
+    } else if (pDevice->Bc12Type & BC12_TYPE_PROPRIETARY) {
+        icl = 2000;
+    } else if (pDevice->Bc12Type & BC12_TYPE_CDP) {
+        icl = 1500;
+    } else if (pDevice->Bc12Type & BC12_TYPE_SDP) {
+        icl = 500;
+    } else {
+        /* Unknown or not yet detected - use a conservative 500 mA */
+        icl = 500;
+    }
+
+    /* Cap by the RP advertisement if PD is in use */
+    if (pDevice->RpCurrentAdvertised > 0 && icl > pDevice->RpCurrentAdvertised) {
+        icl = pDevice->RpCurrentAdvertised;
+    }
+
+    /* Never exceed the ACPI-configured driver limit */
+    if (pDevice->InputCurrentLimit > 0 && icl > pDevice->InputCurrentLimit) {
+        icl = pDevice->InputCurrentLimit;
+    }
+
+    Print(DEBUG_LEVEL_INFO, DBG_IOCTL,
+          "ICL policy: bc12=0x%02x rp=%lu cfg=%lu -> %lu mA\n",
+          pDevice->Bc12Type,
+          pDevice->RpCurrentAdvertised,
+          pDevice->InputCurrentLimit,
+          icl);
+
+    return ChargerSetInputCurrent(pDevice, icl);
 }
 
 // ---- Charge state query ----------------------------------------------------
@@ -572,7 +690,8 @@ ChargerSetShipMode(
           forced, auto_vref, auto_time);
 
     return update_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_CHGCNTL11,
-                       0xFF, val);
+                       SHIP_FORCED | SHIP_AUTO_TIME_MASK | SHIP_AUTO_VREF_MASK,
+                       val);
 }
 
 // ---- Probe: apply full charger configuration -------------------------------
@@ -589,25 +708,22 @@ ChargerProbe(
     Print(DEBUG_LEVEL_INFO, DBG_INIT, "SM5714 charger probe start\n");
 
     //
-    // Watchdog (40 s timeout, kick clear)
+    // Configure the watchdog timeout, clear any stale expiry, and leave it
+    // disabled until a periodic keepalive path is available.
     //
-    ChargerSetWatchdogEnable(pDevice, true);
-    if (pDevice->WdtTimer) {
-        ChargerSetWatchdogTimer(pDevice, pDevice->WdtTimer);
-    } else {
-        ChargerSetWatchdogTimer(pDevice, 2);
-    }
-    ChargerKickWatchdog(pDevice);
-    ChargerClearWatchdog(pDevice);
+    ret = ChargerSetWatchdogTimer(pDevice, pDevice->WdtTimer);
+    if (ret < 0) goto err;
+
+    ret = ChargerClearWatchdog(pDevice);
+    if (ret < 0) goto err;
+
+    ret = ChargerSetWatchdogEnable(pDevice, FALSE);
+    if (ret < 0) goto err;
 
     //
     // Float voltage
     //
-    if (pDevice->FloatVoltage) {
-        fv = pDevice->FloatVoltage;
-    } else {
-        fv = 4350;
-    }
+    fv = pDevice->FloatVoltage;
     ret = ChargerSetFloatVoltage(pDevice, fv);
     if (ret < 0) goto err;
 
@@ -620,84 +736,60 @@ ChargerProbe(
     //
     // Input current limit
     //
-    if (pDevice->InputCurrentLimit) {
-        icl = pDevice->InputCurrentLimit;
-    } else {
-        icl = 1500;
-    }
+    icl = pDevice->InputCurrentLimit;
     ret = ChargerSetInputCurrent(pDevice, icl);
     if (ret < 0) goto err;
 
     //
     // Charging current
     //
-    if (pDevice->ChargingCurrent) {
-        ichg = pDevice->ChargingCurrent;
-    } else {
-        ichg = 2000;
-    }
+    ichg = pDevice->ChargingCurrent;
     ret = ChargerSetChargeCurrent(pDevice, ichg);
     if (ret < 0) goto err;
 
     //
     // Top-off current
     //
-    if (pDevice->TopoffCurrent) {
-        top = pDevice->TopoffCurrent;
-    } else {
-        top = 200;
-    }
+    top = pDevice->TopoffCurrent;
     ret = ChargerSetTopoffCurrent(pDevice, top);
     if (ret < 0) goto err;
 
     //
     // Trickle current
     //
-    if (pDevice->TrickleCurrent) {
-        trkl = pDevice->TrickleCurrent;
-    } else {
-        trkl = 450;
-    }
+    trkl = pDevice->TrickleCurrent;
     ret = ChargerSetTrickleCurrent(pDevice, trkl);
     if (ret < 0) goto err;
 
     //
-    // AICL
+    // AICL: set threshold to 4.5V (matches Android AICL_TH_V_4_5),
+    // then enable.  4.5V is more conservative than the chip's default
+    // (4.35V) and avoids spurious AICL trips on healthy adapters.
     //
-    if (pDevice->AiclEnabled) {
-        ChargerSetAiclEnable(pDevice, true);
-    }
+    ret = ChargerSetAiclThreshold(pDevice, 2);   /* index 2 = 4.5V */
+    if (ret < 0) goto err;
+
+    ret = ChargerSetAiclEnable(pDevice, pDevice->AiclEnabled);
+    if (ret < 0) goto err;
 
     //
     // Discharge OCP
     //
-    if (pDevice->DischgLimit) {
-        dischg = pDevice->DischgLimit;
-    } else {
-        dischg = 3;
-    }
+    dischg = pDevice->DischgLimit;
     ret = ChargerSetDischargeLimit(pDevice, dischg);
     if (ret < 0) goto err;
 
     //
     // Top-off timer
     //
-    if (pDevice->TopoffTimer) {
-        ttimer = pDevice->TopoffTimer;
-    } else {
-        ttimer = 0;
-    }
+    ttimer = pDevice->TopoffTimer;
     ret = ChargerSetTopoffTimer(pDevice, ttimer);
     if (ret < 0) goto err;
 
     //
     // LX slope
     //
-    if (pDevice->LxSlope) {
-        lxslope = pDevice->LxSlope;
-    } else {
-        lxslope = 0;
-    }
+    lxslope = pDevice->LxSlope;
     ret = ChargerSetLxSlope(pDevice, lxslope);
     if (ret < 0) goto err;
 
@@ -719,16 +811,19 @@ ChargerProcessInterrupts(
     )
 {
     NTSTATUS status;
+    NTSTATUS read_status;
+    NTSTATUS action_status;
     UCHAR    i1 = 0, i2 = 0, i3 = 0, i4 = 0, i5 = 0;
 
     status = read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_INT1, &i1);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-    read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_INT2, &i2);
-    read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_INT3, &i3);
-    read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_INT4, &i4);
-    read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_INT5, &i5);
+    read_status = read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_INT2, &i2);
+    if (NT_SUCCESS(status) && !NT_SUCCESS(read_status)) status = read_status;
+    read_status = read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_INT3, &i3);
+    if (NT_SUCCESS(status) && !NT_SUCCESS(read_status)) status = read_status;
+    read_status = read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_INT4, &i4);
+    if (NT_SUCCESS(status) && !NT_SUCCESS(read_status)) status = read_status;
+    read_status = read_reg8(pDevice, CHG_SPB, SM5714_CHG_REG_INT5, &i5);
+    if (NT_SUCCESS(status) && !NT_SUCCESS(read_status)) status = read_status;
 
     if (i1 || i2 || i3 || i4 || i5) {
         Print(DEBUG_LEVEL_VERBOSE, DBG_IOCTL,
@@ -744,10 +839,14 @@ ChargerProcessInterrupts(
     }
     if (i1 & CHG_INT1_VBUSOVP) {
         Print(DEBUG_LEVEL_ERROR, DBG_IOCTL, "  VBUS OVP!\n");
-        ChargerEnable(pDevice, false);
+        action_status = ChargerEnable(pDevice, FALSE);
+        if (NT_SUCCESS(status) && !NT_SUCCESS(action_status)) status = action_status;
     }
     if (i1 & CHG_INT1_VBUSUVLO) {
-        pDevice->VbusPresent = FALSE;
+        pDevice->VbusPresent  = FALSE;
+        pDevice->Bc12Type     = 0;
+        action_status = ChargerEnable(pDevice, FALSE);
+        if (NT_SUCCESS(status) && !NT_SUCCESS(action_status)) status = action_status;
         Print(DEBUG_LEVEL_INFO, DBG_IOCTL, "  VBUS UVLO\n");
     }
 
@@ -766,21 +865,63 @@ ChargerProcessInterrupts(
     }
     if (i2 & CHG_INT2_NOBAT) {
         Print(DEBUG_LEVEL_ERROR, DBG_IOCTL, "  No battery!\n");
-        ChargerEnable(pDevice, false);
+        action_status = ChargerEnable(pDevice, FALSE);
+        if (NT_SUCCESS(status) && !NT_SUCCESS(action_status)) status = action_status;
     }
     if (i2 & CHG_INT2_BATOVP) {
         Print(DEBUG_LEVEL_ERROR, DBG_IOCTL, "  Battery OVP!\n");
-        ChargerEnable(pDevice, false);
+        action_status = ChargerEnable(pDevice, FALSE);
+        if (NT_SUCCESS(status) && !NT_SUCCESS(action_status)) status = action_status;
     }
     if (i2 & CHG_INT2_AICL) {
-        Print(DEBUG_LEVEL_INFO, DBG_IOCTL, "  AICL active\n");
+        /*
+         * Hardware AICL detected a weak input.  Reduce the input current
+         * limit by 100 mA per event (mirrors Android _reduce_input_limit_current)
+         * down to a floor of 300 mA (Android MINIMUM_INPUT_CURRENT).
+         */
+        UCHAR vbuscntl = 0;
+        ULONG icl;
+        action_status = read_reg8(pDevice, CHG_SPB,
+                                  SM5714_CHG_REG_VBUSCNTL, &vbuscntl);
+        if (!NT_SUCCESS(action_status)) {
+            if (NT_SUCCESS(status)) status = action_status;
+        } else {
+            icl = (ULONG)(((vbuscntl & 0x7F) * 25) +
+                          CHG_INPUT_CURRENT_MIN_MA);
+            if (icl > AICL_MIN_INPUT_CURRENT_MA) {
+                icl = (icl > AICL_MIN_INPUT_CURRENT_MA +
+                             AICL_REDUCE_CURRENT_STEP_MA)
+                    ? (icl - AICL_REDUCE_CURRENT_STEP_MA)
+                    : AICL_MIN_INPUT_CURRENT_MA;
+                action_status = ChargerSetInputCurrent(pDevice, icl);
+                if (NT_SUCCESS(action_status)) {
+                    Print(DEBUG_LEVEL_INFO, DBG_IOCTL,
+                          "AICL: ICL reduced to %lu mA\n", icl);
+                } else if (NT_SUCCESS(status)) {
+                    status = action_status;
+                }
+            } else {
+                Print(DEBUG_LEVEL_INFO, DBG_IOCTL,
+                      "AICL: ICL already at floor %lu mA\n", icl);
+            }
+        }
     }
 
     //
     // INT3: system / thermal
     //
     if (i3 & CHG_INT3_OTGFAIL) {
-        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL, "  OTG boost fail!\n");
+        /* OTG boost overcurrent — shut down boost to protect connected device */
+        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+              "  OTG boost fail (overcurrent)! Disabling OTG\n");
+          action_status = typec_set_otg_mode(pDevice, FALSE);
+          if (NT_SUCCESS(status) && !NT_SUCCESS(action_status)) status = action_status;
+        }
+        if (i3 & CHG_INT3_THEMSHDN) {
+          Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+              "  Thermal shutdown! Disabling charging\n");
+          action_status = ChargerEnable(pDevice, FALSE);
+          if (NT_SUCCESS(status) && !NT_SUCCESS(action_status)) status = action_status;
     }
     if (i3 & CHG_INT3_THEMREG) {
         Print(DEBUG_LEVEL_INFO, DBG_IOCTL, "  Thermal regulation active\n");
@@ -796,7 +937,7 @@ ChargerProcessInterrupts(
         Print(DEBUG_LEVEL_INFO, DBG_IOCTL, "  Boost OK\n");
     }
 
-    return STATUS_SUCCESS;
+    return status;
 }
 
 // ---- BC1.2 charger type detection ------------------------------------------
