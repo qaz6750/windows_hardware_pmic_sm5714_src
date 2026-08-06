@@ -21,6 +21,7 @@ Abstract:
 #include "wdf.tmh"
 #include <initguid.h>
 #include <acpiioct.h>
+#include <wdmguid.h>
 #include <wdm.h>
 
 //------------------------------------------------------------------- Prototypes
