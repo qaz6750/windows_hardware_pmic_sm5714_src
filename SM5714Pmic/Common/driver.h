@@ -25,11 +25,6 @@
 
 #define SPB_POOL_TAG            (ULONG) '7495'
 
-#define bool int
-
-#define true 1
-#define false 0
-
 typedef struct _DEVICE_CONTEXT
 {
 
@@ -40,6 +35,7 @@ typedef struct _DEVICE_CONTEXT
 	SPB_CONTEXT     SpbContexts[3];
 	ULONG           SpbContextCount;
 	BOOLEAN DevicePoweredOn;
+	BOOLEAN TypecInitialized;
 	WDFWAITLOCK DataLock;
 
 	BOOLEAN                         Autostop;            // 0 = off, 1 = on
@@ -61,9 +57,24 @@ typedef struct _DEVICE_CONTEXT
 	ULONG                           RpCurrentAdvertised; // mA from CC advertisement
 
 	// Type-C state
+	BOOLEAN                         IsAttached;
 	UCHAR                           AttachType;          // SM5714_ATTACH_xxx
 	UCHAR                           CcOrientation;       // 0=CC1, 1=CC2, 2=Open
-    UCHAR                           Bc12Type;            // BC1.2 detected type
+	BOOLEAN                         VbusPresent;
+	UCHAR                           Bc12Type;            // BC1.2 detected type
+	BOOLEAN                         IsAudioAccessory;
+	BOOLEAN                         IsDebugAccessory;
+
+	// DisplayPort Alt Mode state
+	BOOLEAN                         DpAltModeActive;
+	BOOLEAN                         DpConfigured;
+	BOOLEAN                         DpHpdState;
+	BOOLEAN                         DpIrqHpd;
+	UCHAR                           DpState;
+	UCHAR                           DpSelectedPin;
+	UCHAR                           DpPartnerPinAssignments;
+	UCHAR                           DpMuxMode;
+	UCHAR                           PdMsgId;
 } DEVICE_CONTEXT, *PDEVICE_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT, GetDeviceContext)
@@ -100,7 +111,7 @@ EVT_WDF_INTERRUPT_ISR EvtPdInterruptIsr;
 #if 1
 #define Print(dbglevel, dbgcatagory, fmt, ...) {          \
     if (DebugLevel >= dbglevel &&                         \
-        (DebugCatagories && dbgcatagory))                 \
+		(DebugCategories & dbgcatagory))                    \
 	    {                                                           \
         DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, DRIVERNAME);                                   \
 		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, fmt, __VA_ARGS__);                             \

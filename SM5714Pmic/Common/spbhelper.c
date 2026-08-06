@@ -31,8 +31,12 @@ NTSTATUS read_reg(
     SPB_CONTEXT* spbCtx = &pDevice->SpbContexts[spbIndex];
     status = SpbWriteRead(spbCtx, &reg_addr, sizeof(reg_addr), read_buf, sizeof(read_buf), 0);
 
-    // Combine 2 bytes into a 16-bit (LSB first)
-    *data = ((unsigned short)read_buf[1] << 8) | read_buf[0];
+    if (NT_SUCCESS(status))
+    {
+        // Combine 2 bytes into a 16-bit (LSB first)
+        *data = ((unsigned short)read_buf[1] << 8) | read_buf[0];
+    }
+
     return status;
 }
 
@@ -49,6 +53,8 @@ NTSTATUS update_reg(
 
     // Read current 16-bit value
     status = read_reg(pDevice, spbIndex, reg, &current);
+    if (!NT_SUCCESS(status))
+        return status;
 
     // Clear the bits defined by mask, then OR in (val & mask).
     new_val = (current & ~mask) | (val & mask);

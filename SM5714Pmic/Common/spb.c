@@ -24,7 +24,7 @@ Revision History:
 #include <spb.h>
 
 static ULONG DebugLevel = 100;
-static ULONG DebugCategories = DBG_INIT || DBG_PNP || DBG_IOCTL;
+static ULONG DebugCategories = DBG_INIT | DBG_PNP | DBG_IOCTL;
 #define I2C_VERBOSE_LOGGING 0
 
 NTSTATUS

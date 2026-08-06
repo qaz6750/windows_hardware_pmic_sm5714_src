@@ -10,11 +10,11 @@ enum chg_status_regs {
     SM5714_CHG_REG_INT3        = 0x03,
     SM5714_CHG_REG_INT4        = 0x04,
     SM5714_CHG_REG_INT5        = 0x05,
-    SM5714_CHG_REG_INTMSK1     = 0x06,
-    SM5714_CHG_REG_INTMSK2     = 0x07,
-    SM5714_CHG_REG_INTMSK3     = 0x08,
-    SM5714_CHG_REG_INTMSK4     = 0x09,
-    SM5714_CHG_REG_INTMSK5     = 0x0A,
+	SM5714_CHG_REG_INTMSK1     = 0x07,
+	SM5714_CHG_REG_INTMSK2     = 0x08,
+	SM5714_CHG_REG_INTMSK3     = 0x09,
+	SM5714_CHG_REG_INTMSK4     = 0x0A,
+	SM5714_CHG_REG_INTMSK5     = 0x0B,
     SM5714_CHG_REG_STATUS1      = 0x0D,
     SM5714_CHG_REG_STATUS2      = 0x0E,
     SM5714_CHG_REG_STATUS3      = 0x0F,
@@ -46,22 +46,33 @@ enum chg_cntl_regs {
 // Charger STATUS1 bit masks
 //
 #define CHG_STAT1_VBUSPOK      (1 << 0)
-#define CHG_STAT1_VBUSOVP      (1 << 1)
-#define CHG_STAT1_VSYSUVLO     (1 << 2)
-#define CHG_STAT1_THERMAL_SD   (1 << 3)
-#define CHG_STAT1_OTGFAIL      (1 << 5)
-#define CHG_STAT1_SFTMEXP      (1 << 6)
-#define CHG_STAT1_BATOVP       (1 << 7)
+#define CHG_STAT1_VBUSUVLO     (1 << 1)
+#define CHG_STAT1_VBUSOVP      (1 << 2)
+#define CHG_STAT1_VBUSLIMIT    (1 << 3)
 
 //
 // Charger STATUS2 bit masks
 //
-#define CHG_STAT2_TOPOFF       (1 << 5)
-#define CHG_STAT2_DONE         (1 << 4)
+#define CHG_STAT2_AICL         (1 << 0)
+#define CHG_STAT2_BATOVP       (1 << 1)
+#define CHG_STAT2_NOBAT        (1 << 2)
 #define CHG_STAT2_CHG_ON       (1 << 3)
-#define CHG_STAT2_BATTERY_PRES (1 << 2)
-#define CHG_STAT2_AICL_FAIL    (1 << 6)
+#define CHG_STAT2_Q4FULLON     (1 << 4)
+#define CHG_STAT2_TOPOFF       (1 << 5)
+#define CHG_STAT2_DONE         (1 << 6)
 #define CHG_STAT2_WDT_EXP      (1 << 7)
+
+//
+// Charger STATUS3 bit masks
+//
+#define CHG_STAT3_THERMREG     (1 << 0)
+#define CHG_STAT3_THERMSHDN    (1 << 1)
+#define CHG_STAT3_OTGFAIL      (1 << 2)
+#define CHG_STAT3_DISLIMIT     (1 << 3)
+#define CHG_STAT3_TRICKLE_TMR  (1 << 4)
+#define CHG_STAT3_FAST_TMR     (1 << 5)
+#define CHG_STAT3_nENQ4        (1 << 6)
+#define CHG_STAT3_VSYSOVP      (1 << 7)
 
 //
 // Charger CNTL1 bit masks
@@ -113,7 +124,7 @@ enum chg_cntl_regs {
 //
 // Factory control (FACTORY1 bit masks)
 //
-#define FACTORY1_BYPASS_MODE    (1 << 7)    // Bypass / factory mode enable
+#define FACTORY1_BYPASS_MODE    (1 << 1)    // Bypass / factory mode enable
 
 //
 // Trickle current (CHGCNTL3)
@@ -248,6 +259,20 @@ enum typec_usbpd_reg {
 #define SM5714_INT_STATUS3_VCONN_OCP     (1 << 3)
 #define SM5714_INT_STATUS3_WATER_RLS     (1 << 4)
 
+#define SM5714_INT_STATUS4_RX_DONE       (1 << 0)
+#define SM5714_INT_STATUS4_TX_DONE       (1 << 1)
+#define SM5714_INT_STATUS4_TX_SOP_ERR    (1 << 2)
+#define SM5714_INT_STATUS4_PRL_RST_DONE  (1 << 4)
+#define SM5714_INT_STATUS4_HRST_RCVED    (1 << 5)
+#define SM5714_INT_STATUS4_HCRST_DONE    (1 << 6)
+#define SM5714_INT_STATUS4_TX_DISCARD    (1 << 7)
+
+#define SM5714_INT_STATUS5_SBU1_OVP      (1 << 0)
+#define SM5714_INT_STATUS5_SBU2_OVP      (1 << 1)
+#define SM5714_INT_STATUS5_JIG_CASE_ON   (1 << 3)
+#define SM5714_INT_STATUS5_DPDM_SHORT    (1 << 6)
+#define SM5714_INT_STATUS5_CC_ABNORMAL   (1 << 7)
+
 //
 // CC_STATUS register (0x28) field masks
 //
@@ -259,7 +284,9 @@ enum typec_usbpd_reg {
 #define SM5714_ATTACH_NONE               0x00
 #define SM5714_ATTACH_SOURCE             0x01   // We are Sink (charger connected)
 #define SM5714_ATTACH_SINK               0x02   // We are Source (OTG device connected)
-#define SM5714_ATTACH_AUDIO              0x03
+#define SM5714_ATTACH_AUDIO              0x03   // Audio accessory (Ra/Ra)
+#define SM5714_ATTACH_UN_ORI_DEBUG_SOURCE 0x04  // Debug accessory, source, unoriented
+#define SM5714_ATTACH_ORI_DEBUG_SOURCE   0x05   // Debug accessory, source, oriented
 
 // RP current advertisement (CC_STATUS bits [4:3])
 #define SM5714_RP_CURRENT_DEFAULT        0x00   // 500mA
@@ -279,35 +306,96 @@ enum typec_usbpd_reg {
 #define USBPD_ENABLED_INT3   (SM5714_INT_STATUS3_WATER | \
                               SM5714_INT_STATUS3_WATER_RLS)
 
+#define USBPD_ENABLED_INT4   (SM5714_INT_STATUS4_RX_DONE      | \
+                              SM5714_INT_STATUS4_TX_DONE      | \
+                              SM5714_INT_STATUS4_TX_SOP_ERR   | \
+                              SM5714_INT_STATUS4_PRL_RST_DONE | \
+                              SM5714_INT_STATUS4_HRST_RCVED   | \
+                              SM5714_INT_STATUS4_HCRST_DONE   | \
+                              SM5714_INT_STATUS4_TX_DISCARD)
+
+#define USBPD_ENABLED_INT5   (SM5714_INT_STATUS5_SBU1_OVP | \
+                              SM5714_INT_STATUS5_SBU2_OVP | \
+                              SM5714_INT_STATUS5_CC_ABNORMAL)
+
+//
+// SM5714 TX request values
+//
+#define SM5714_REG_MSG_SEND_TX_SOP_REQ    0x07
+#define SM5714_REG_MSG_SEND_TX_SOPP_REQ   0x17
+#define SM5714_REG_MSG_SEND_TX_SOPPP_REQ  0x27
+
+//
+// USB Power Delivery / VDM constants used for DisplayPort Alt Mode.
+//
+#define USBPD_REV_20                      1
+#define USBPD_DFP                         1
+#define USBPD_SINK                        0
+#define USBPD_SOURCE                      1
+#define USBPD_VENDOR_DEFINED              0x0F
+
+#define PD_SID_DISPLAYPORT                0xFF01
+#define VDM_TYPE_STRUCTURED               1
+#define VDM_COMMAND_TYPE_INITIATOR        0
+#define VDM_COMMAND_TYPE_RESPONDER_ACK    1
+#define VDM_DISCOVER_IDENTITY             1
+#define VDM_DISCOVER_SVIDS                2
+#define VDM_DISCOVER_MODES                3
+#define VDM_ENTER_MODE                    4
+#define VDM_EXIT_MODE                     5
+#define VDM_ATTENTION                     6
+#define VDM_DISPLAYPORT_STATUS_UPDATE     0x10
+#define VDM_DISPLAYPORT_CONFIGURE         0x11
+
+#define DP_PORT_CONNECTED_NONE            0
+#define DP_PORT_CONNECTED_DFP_D           1
+#define DP_PORT_CONNECTED_UFP_D           2
+#define DP_PORT_CONNECTED_BOTH            3
+#define DP_CONFIG_USB                     0
+#define DP_CONFIG_USB_U_AS_DFP_D          1
+#define DP_CONFIG_USB_U_AS_UFP_D          2
+#define DP_PROTOCOL_DP_V13                1
+
+#define DP_PIN_ASSIGNMENT_A               0x01
+#define DP_PIN_ASSIGNMENT_B               0x02
+#define DP_PIN_ASSIGNMENT_C               0x04
+#define DP_PIN_ASSIGNMENT_D               0x08
+#define DP_PIN_ASSIGNMENT_E               0x10
+#define DP_PIN_ASSIGNMENT_F               0x20
+
 //
 // Charger interrupt bit masks (CHG_REG_INT1-5)
 //
-#define CHG_INT1_VBUSLIMIT     (1 << 0)
-#define CHG_INT1_VBUSOVP       (1 << 1)
-#define CHG_INT1_VBUSUVLO      (1 << 2)
-#define CHG_INT1_VBUSPOK       (1 << 3)
+#define CHG_INT1_VBUSLIMIT     (1 << 3)
+#define CHG_INT1_VBUSOVP       (1 << 2)
+#define CHG_INT1_VBUSUVLO      (1 << 1)
+#define CHG_INT1_VBUSPOK       (1 << 0)
 
-#define CHG_INT2_WDTMROFF      (1 << 0)
-#define CHG_INT2_DONE          (1 << 1)
-#define CHG_INT2_TOPOFF        (1 << 2)
-#define CHG_INT2_Q4FULLON      (1 << 3)
-#define CHG_INT2_CHGON         (1 << 4)
-#define CHG_INT2_NOBAT         (1 << 5)
-#define CHG_INT2_BATOVP        (1 << 6)
-#define CHG_INT2_AICL          (1 << 7)
+#define CHG_INT2_WDTMROFF      (1 << 7)
+#define CHG_INT2_DONE          (1 << 6)
+#define CHG_INT2_TOPOFF        (1 << 5)
+#define CHG_INT2_Q4FULLON      (1 << 4)
+#define CHG_INT2_CHGON         (1 << 3)
+#define CHG_INT2_NOBAT         (1 << 2)
+#define CHG_INT2_BATOVP        (1 << 1)
+#define CHG_INT2_AICL          (1 << 0)
 
-#define CHG_INT3_VSYSOVP       (1 << 0)
-#define CHG_INT3_nENQ4         (1 << 3)
-#define CHG_INT3_OTGFAIL       (1 << 4)
-#define CHG_INT3_THEMREG       (1 << 5)
+#define CHG_INT3_VSYSOVP       (1 << 7)
+#define CHG_INT3_nENQ4         (1 << 6)
+#define CHG_INT3_FASTTMROFF    (1 << 5)
+#define CHG_INT3_TRICKLETMROFF (1 << 4)
+#define CHG_INT3_DISLIMIT      (1 << 3)
+#define CHG_INT3_OTGFAIL       (1 << 2)
+#define CHG_INT3_THEMSHDN      (1 << 1)
+#define CHG_INT3_THEMREG       (1 << 0)
 
-#define CHG_INT4_CVMODE        (1 << 0)
+#define CHG_INT4_CVMODE        (1 << 7)
 #define CHG_INT4_BOOSTPOK      (1 << 1)
-#define CHG_INT4_BOOSTPOK_NG   (1 << 2)
+#define CHG_INT4_BOOSTPOK_NG   (1 << 0)
 
-#define CHG_INT5_ABSTMROFF     (1 << 0)
+#define CHG_INT5_ABSTMROFF     (1 << 6)
 #define CHG_INT5_FLEDOPEN      (1 << 1)
-#define CHG_INT5_FLEDSHORT     (1 << 2)
+#define CHG_INT5_FLEDSHORT     (1 << 0)
 
 //
 // Charger IRQ mask values (0 = enabled, 1 = masked)
@@ -321,7 +409,9 @@ enum typec_usbpd_reg {
                                          CHG_INT2_NOBAT  | \
                                          CHG_INT2_BATOVP | \
                                          CHG_INT2_AICL))
-#define CHG_INT3_MASK_VALUE    ((UCHAR)~(CHG_INT3_OTGFAIL | CHG_INT3_THEMREG))
+#define CHG_INT3_MASK_VALUE    ((UCHAR)~(CHG_INT3_OTGFAIL | \
+										 CHG_INT3_THEMSHDN | \
+										 CHG_INT3_THEMREG))
 #define CHG_INT4_MASK_VALUE    0xFF
 #define CHG_INT5_MASK_VALUE    0xFF
 

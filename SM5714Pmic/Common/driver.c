@@ -5,7 +5,7 @@
 #include "..\TypeC\typec.h"
 
 static ULONG DebugLevel = 100;
-static ULONG DebugCatagories = DBG_INIT || DBG_PNP || DBG_IOCTL;
+static ULONG DebugCategories = DBG_INIT | DBG_PNP | DBG_IOCTL;
 
 #define GET_INTEGER(_arg_) (*(PULONG UNALIGNED)((_arg_)->Data))
 
@@ -73,7 +73,7 @@ EvtPdInterruptIsr(
     if (pDevice->SpbContextCount < 2)
         return FALSE;
 
-    if (!pDevice->DevicePoweredOn)
+    if (!pDevice->DevicePoweredOn || !pDevice->TypecInitialized)
     {
         // Not ready to process events yet, but must clear interrupt
         // registers to deassert the INT line and prevent storm/deadlock.
@@ -145,12 +145,12 @@ FetchPmicConfig(
         DevCtx->TopoffCurrent      = GET_INTEGER(&output->Argument[3]);
 
         // Arguments 4-7: advanced charging (optional, use defaults)
-        DevCtx->FloatVoltage       = 4350;  // Default: 4.35V
-        DevCtx->WdtTimer           = 2;     // Default: 40s
+        DevCtx->FloatVoltage       = 4380;  // GTS7FE battery float voltage
+        DevCtx->WdtTimer           = 2;     // 90s
         DevCtx->AiclEnabled        = FALSE;
-        DevCtx->DischgLimit        = 3;     // Default: 3.5A
-        DevCtx->TopoffTimer        = 0;     // Default: 15min
-        DevCtx->LxSlope            = 0;     // Default: 0.45V/μs
+        DevCtx->DischgLimit        = 7;     // Disabled by GTS7FE battery data
+        DevCtx->TopoffTimer        = 3;     // 45min
+        DevCtx->LxSlope            = 1;     // SM5714 default
         DevCtx->TrickleCurrent     = 450;   // Default: 450mA
 
         if (output->Count >= 5 &&
@@ -359,6 +359,9 @@ Status
     NTSTATUS status = STATUS_SUCCESS;
     Print(DEBUG_LEVEL_INFO, DBG_PNP, "OnD0Entry called\n");
 
+    pDevice->DevicePoweredOn = FALSE;
+    pDevice->TypecInitialized = FALSE;
+
     status = FetchPmicConfig(FxDevice, pDevice);
     if (!NT_SUCCESS(status))
     {
@@ -396,34 +399,44 @@ Status
     // Set up charger interrupt masks.
     // 0 = enabled, 1 = masked (inverted logic).
     //
-    write_reg8(pDevice, SPB_CHARGER_INDEX,
-               SM5714_CHG_REG_INTMSK1, CHG_INT1_MASK_VALUE);
-    write_reg8(pDevice, SPB_CHARGER_INDEX,
-               SM5714_CHG_REG_INTMSK2, CHG_INT2_MASK_VALUE);
-    write_reg8(pDevice, SPB_CHARGER_INDEX,
-               SM5714_CHG_REG_INTMSK3, CHG_INT3_MASK_VALUE);
-    write_reg8(pDevice, SPB_CHARGER_INDEX,
-               SM5714_CHG_REG_INTMSK4, CHG_INT4_MASK_VALUE);
-    write_reg8(pDevice, SPB_CHARGER_INDEX,
-               SM5714_CHG_REG_INTMSK5, CHG_INT5_MASK_VALUE);
+    status = write_reg8(pDevice, SPB_CHARGER_INDEX,
+                        SM5714_CHG_REG_INTMSK1, CHG_INT1_MASK_VALUE);
+    if (!NT_SUCCESS(status)) goto exit;
+    status = write_reg8(pDevice, SPB_CHARGER_INDEX,
+                        SM5714_CHG_REG_INTMSK2, CHG_INT2_MASK_VALUE);
+    if (!NT_SUCCESS(status)) goto exit;
+    status = write_reg8(pDevice, SPB_CHARGER_INDEX,
+                        SM5714_CHG_REG_INTMSK3, CHG_INT3_MASK_VALUE);
+    if (!NT_SUCCESS(status)) goto exit;
+    status = write_reg8(pDevice, SPB_CHARGER_INDEX,
+                        SM5714_CHG_REG_INTMSK4, CHG_INT4_MASK_VALUE);
+    if (!NT_SUCCESS(status)) goto exit;
+    status = write_reg8(pDevice, SPB_CHARGER_INDEX,
+                        SM5714_CHG_REG_INTMSK5, CHG_INT5_MASK_VALUE);
+    if (!NT_SUCCESS(status)) goto exit;
 
     // Clear any pending charger interrupts
     {
-        UCHAR dummy;
-        read_reg8(pDevice, SPB_CHARGER_INDEX,
-                  SM5714_CHG_REG_INT1, &dummy);
-        read_reg8(pDevice, SPB_CHARGER_INDEX,
-                  SM5714_CHG_REG_INT2, &dummy);
-        read_reg8(pDevice, SPB_CHARGER_INDEX,
-                  SM5714_CHG_REG_INT3, &dummy);
-        read_reg8(pDevice, SPB_CHARGER_INDEX,
-                  SM5714_CHG_REG_INT4, &dummy);
-        read_reg8(pDevice, SPB_CHARGER_INDEX,
-                  SM5714_CHG_REG_INT5, &dummy);
+        UCHAR dummy = 0;
+        status = read_reg8(pDevice, SPB_CHARGER_INDEX,
+                   SM5714_CHG_REG_INT1, &dummy);
+        if (!NT_SUCCESS(status)) goto exit;
+        status = read_reg8(pDevice, SPB_CHARGER_INDEX,
+                   SM5714_CHG_REG_INT2, &dummy);
+        if (!NT_SUCCESS(status)) goto exit;
+        status = read_reg8(pDevice, SPB_CHARGER_INDEX,
+                   SM5714_CHG_REG_INT3, &dummy);
+        if (!NT_SUCCESS(status)) goto exit;
+        status = read_reg8(pDevice, SPB_CHARGER_INDEX,
+                   SM5714_CHG_REG_INT4, &dummy);
+        if (!NT_SUCCESS(status)) goto exit;
+        status = read_reg8(pDevice, SPB_CHARGER_INDEX,
+                   SM5714_CHG_REG_INT5, &dummy);
+        if (!NT_SUCCESS(status)) goto exit;
     }
 
     // Enable charging
-    status = ChargerEnable(pDevice, true);
+    status = ChargerEnable(pDevice, TRUE);
     if (!NT_SUCCESS(status))
     {
         Print(DEBUG_LEVEL_ERROR, DBG_IOCTL, "Error enabling charging - %!STATUS!", status);
@@ -436,6 +449,8 @@ Status
 		Print(DEBUG_LEVEL_ERROR, DBG_IOCTL, "Error creating Data Waitlock - %!STATUS!", status);
 		goto exit;
 	}
+
+    pDevice->DevicePoweredOn = TRUE;
 
     // Initialize the USBPD Type-C controller if we have the second I2C bus
     if (pDevice->SpbContextCount >= 2)
@@ -450,10 +465,16 @@ Status
         }
         else
         {
-            pDevice->DevicePoweredOn = TRUE;
+            pDevice->TypecInitialized = TRUE;
 
             // Check if a cable is already plugged in
-            typec_check_initial_state(pDevice);
+            status = typec_check_initial_state(pDevice);
+            if (!NT_SUCCESS(status))
+            {
+                Print(DEBUG_LEVEL_ERROR, DBG_INIT,
+                      "USBPD initial state read failed - 0x%x\n", status);
+                status = STATUS_SUCCESS;
+            }
         }
     }
     else
@@ -463,6 +484,17 @@ Status
     }
 
 exit:
+    if (!NT_SUCCESS(status))
+    {
+        pDevice->DevicePoweredOn = FALSE;
+        pDevice->TypecInitialized = FALSE;
+        if (pDevice->DataLock != NULL)
+        {
+            WdfObjectDelete(pDevice->DataLock);
+            pDevice->DataLock = NULL;
+        }
+    }
+
     return status;
 }
 
@@ -493,6 +525,7 @@ Status
     NTSTATUS status = STATUS_SUCCESS;
 
     pDevice->DevicePoweredOn = FALSE;
+    pDevice->TypecInitialized = FALSE;
 
     // Only disable charging if transitioning to OFF state (S5)
     if (FxPreviousState == WdfPowerDeviceD3Final)
@@ -500,14 +533,15 @@ Status
         // Disable OTG if active before shutting down
         // SM5714_ATTACH_SINK = 0x02
         if (pDevice->AttachType == 0x02)
-            typec_set_otg_mode(pDevice, false);
+            typec_set_otg_mode(pDevice, FALSE);
 
-        ChargerEnable(pDevice, false);
+        ChargerEnable(pDevice, FALSE);
     }
 
     if (pDevice->DataLock != NULL)
     {
         WdfObjectDelete(pDevice->DataLock);
+        pDevice->DataLock = NULL;
     }
     return status;
 }
