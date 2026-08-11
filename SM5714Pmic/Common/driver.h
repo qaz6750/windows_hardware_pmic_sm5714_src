@@ -37,6 +37,10 @@ typedef struct _DEVICE_CONTEXT
 	BOOLEAN DevicePoweredOn;
 	BOOLEAN TypecInitialized;
 	WDFWAITLOCK DataLock;
+	WDFIOTARGET Ps5169Target;
+	BOOLEAN Ps5169TargetOpen;
+	WDFIOTARGET BatteryTarget;
+	BOOLEAN BatteryTargetOpen;
 
 	BOOLEAN                         Autostop;            // 0 = off, 1 = on
 	ULONG                           InputCurrentLimit;   // mA
@@ -64,6 +68,7 @@ typedef struct _DEVICE_CONTEXT
 	UCHAR                           Bc12Type;            // BC1.2 detected type
 	BOOLEAN                         IsAudioAccessory;
 	BOOLEAN                         IsDebugAccessory;
+	BOOLEAN                         SuperSpeedReady;
 
 	// DisplayPort Alt Mode state
 	BOOLEAN                         DpAltModeActive;
@@ -95,6 +100,15 @@ EVT_WDF_IO_QUEUE_IO_INTERNAL_DEVICE_CONTROL EvtInternalDeviceControl;
 
 EVT_WDF_INTERRUPT_ISR EvtChgInterruptIsr;
 EVT_WDF_INTERRUPT_ISR EvtPdInterruptIsr;
+
+NTSTATUS Ps5169ConfigureRedriver(
+	_In_ PDEVICE_CONTEXT pDevice,
+	_In_ UCHAR attach,
+	_In_ UCHAR orientation);
+
+NTSTATUS Sm5714BatterySetExternalPower(
+	_In_ PDEVICE_CONTEXT pDevice,
+	_In_ BOOLEAN externalPowerOnline);
 
 //
 // Helper macros

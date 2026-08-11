@@ -1,5 +1,6 @@
 #include "..\Common\registers.h"
 #include "..\Common\spbhelper.h"
+#include "..\Common\ps5169interface.h"
 #include "..\Charger\charger.h"
 #include "typec.h"
 
@@ -142,6 +143,7 @@ static void typec_set_disconnected_state(_In_ PDEVICE_CONTEXT pDevice)
     pDevice->RpCurrentAdvertised = 0;
     pDevice->IsAudioAccessory = FALSE;
     pDevice->IsDebugAccessory = FALSE;
+    pDevice->SuperSpeedReady = FALSE;
     typec_reset_dp_state(pDevice);
 }
 
@@ -632,8 +634,11 @@ static NTSTATUS typec_process_pd_rx(_In_ PDEVICE_CONTEXT pDevice)
 static NTSTATUS typec_apply_attach_policy(_In_ PDEVICE_CONTEXT pDevice)
 {
     NTSTATUS status = STATUS_SUCCESS;
+    NTSTATUS battery_status;
+    NTSTATUS redriver_status;
     ULONG idx = SPB_USBPD_INDEX;
     UCHAR attach_type = pDevice->AttachType;
+    UCHAR reported_attach;
 
     typec_update_accessory_state(pDevice, attach_type);
     typec_reset_dp_state(pDevice);
@@ -646,7 +651,26 @@ static NTSTATUS typec_apply_attach_policy(_In_ PDEVICE_CONTEXT pDevice)
         if (!NT_SUCCESS(status))
             return status;
 
-        return typec_notify_usb_state(pDevice);
+        pDevice->SuperSpeedReady = FALSE;
+        redriver_status = Ps5169ConfigureRedriver(
+            pDevice,
+            PS5169_CONFIG_ATTACH_NONE,
+            2);
+        if (!NT_SUCCESS(redriver_status))
+        {
+            Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+                  "PS5169 clear failed - 0x%x\n", redriver_status);
+        }
+
+        battery_status = Sm5714BatterySetExternalPower(pDevice, FALSE);
+        if (!NT_SUCCESS(battery_status))
+        {
+            Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+                  "Battery power state update failed - 0x%x\n",
+                  battery_status);
+        }
+
+        return typec_notify_qualcomm_state(pDevice);
     }
 
     if (typec_is_source_like_attach(attach_type))
@@ -738,13 +762,89 @@ static NTSTATUS typec_apply_attach_policy(_In_ PDEVICE_CONTEXT pDevice)
         return STATUS_SUCCESS;
     }
 
-    // Connect D+/D- data lines through the MUIC analog switch.
+    reported_attach = typec_reported_usb_attach(attach_type);
+    redriver_status = Ps5169ConfigureRedriver(
+        pDevice,
+        reported_attach,
+        pDevice->CcOrientation);
+    pDevice->SuperSpeedReady = NT_SUCCESS(redriver_status);
+    if (!pDevice->SuperSpeedReady)
+    {
+        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+              "PS5169 configuration failed - 0x%x, using USB2 fallback\n",
+              redriver_status);
+    }
+
+    battery_status = Sm5714BatterySetExternalPower(
+        pDevice,
+        reported_attach == SM5714_ATTACH_SOURCE);
+    if (!NT_SUCCESS(battery_status))
+    {
+        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+              "Battery power state update failed - 0x%x\n", battery_status);
+    }
+
+    // Publish the Type-C role and SuperSpeed readiness before D+/D- can enumerate.
+    status = typec_notify_qualcomm_state(pDevice);
+    if (!NT_SUCCESS(status))
+    {
+        redriver_status = Ps5169ConfigureRedriver(
+            pDevice,
+            PS5169_CONFIG_ATTACH_NONE,
+            2);
+        if (!NT_SUCCESS(redriver_status))
+        {
+            Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+                  "PS5169 rollback after USBR failure failed - 0x%x\n",
+                  redriver_status);
+        }
+
+        battery_status = Sm5714BatterySetExternalPower(pDevice, FALSE);
+        if (!NT_SUCCESS(battery_status))
+        {
+            Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+                  "Battery rollback after USBR failure failed - 0x%x\n",
+                  battery_status);
+        }
+        return status;
+    }
+
+    // Connect D+/D- only after the redriver and Qualcomm state are settled.
     status = muic_set_usb_path(pDevice, TRUE);
     if (!NT_SUCCESS(status))
-        return status;
+    {
+        typec_set_disconnected_state(pDevice);
 
-    // Notify the USB stack about the new state.
-    return typec_notify_usb_state(pDevice);
+        redriver_status = Ps5169ConfigureRedriver(
+            pDevice,
+            PS5169_CONFIG_ATTACH_NONE,
+            2);
+        if (!NT_SUCCESS(redriver_status))
+        {
+            Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+                  "PS5169 rollback after MUIC failure failed - 0x%x\n",
+                  redriver_status);
+        }
+
+        battery_status = Sm5714BatterySetExternalPower(pDevice, FALSE);
+        if (!NT_SUCCESS(battery_status))
+        {
+            Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+                  "Battery rollback after MUIC failure failed - 0x%x\n",
+                  battery_status);
+        }
+
+        redriver_status = typec_notify_qualcomm_state(pDevice);
+        if (!NT_SUCCESS(redriver_status))
+        {
+            Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+                  "USB state rollback after MUIC failure failed - 0x%x\n",
+                  redriver_status);
+        }
+        return status;
+    }
+
+    return STATUS_SUCCESS;
 }
 
 //
@@ -830,6 +930,7 @@ NTSTATUS typec_reg_init(_In_ PDEVICE_CONTEXT pDevice)
 NTSTATUS typec_check_initial_state(_In_ PDEVICE_CONTEXT pDevice)
 {
     NTSTATUS status;
+    NTSTATUS battery_status;
     UCHAR cc_status = 0;
     UCHAR status1 = 0;
     ULONG idx = SPB_USBPD_INDEX;
@@ -865,6 +966,14 @@ NTSTATUS typec_check_initial_state(_In_ PDEVICE_CONTEXT pDevice)
     else
     {
         typec_set_disconnected_state(pDevice);
+
+        battery_status = Sm5714BatterySetExternalPower(pDevice, FALSE);
+        if (!NT_SUCCESS(battery_status))
+        {
+            Print(DEBUG_LEVEL_ERROR, DBG_INIT,
+                  "Initial battery power state update failed - 0x%x\n",
+                  battery_status);
+        }
     }
 
     return STATUS_SUCCESS;
@@ -900,7 +1009,15 @@ static NTSTATUS typec_process_attach(_In_ PDEVICE_CONTEXT pDevice)
     if (attach_type == SM5714_ATTACH_NONE)
     {
         typec_set_disconnected_state(pDevice);
-        return typec_notify_usb_state(pDevice);
+
+        status = Sm5714BatterySetExternalPower(pDevice, FALSE);
+        if (!NT_SUCCESS(status))
+        {
+            Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+                  "Battery power state update failed - 0x%x\n", status);
+        }
+
+        return typec_notify_qualcomm_state(pDevice);
     }
 
     if (!typec_is_source_like_attach(attach_type) &&
@@ -910,6 +1027,14 @@ static NTSTATUS typec_process_attach(_In_ PDEVICE_CONTEXT pDevice)
         Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
               "Unsupported attach type 0x%x\n", attach_type);
         typec_set_disconnected_state(pDevice);
+
+          status = Sm5714BatterySetExternalPower(pDevice, FALSE);
+          if (!NT_SUCCESS(status))
+          {
+            Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+                "Battery power state update failed - 0x%x\n", status);
+          }
+
         return STATUS_INVALID_DEVICE_STATE;
     }
 
@@ -922,7 +1047,48 @@ static NTSTATUS typec_process_attach(_In_ PDEVICE_CONTEXT pDevice)
 
     status = typec_apply_attach_policy(pDevice);
     if (!NT_SUCCESS(status))
+    {
+        NTSTATUS rollback_status;
+
+        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+              "Attach policy failed - 0x%x, rolling back state\n", status);
         typec_set_disconnected_state(pDevice);
+
+        rollback_status = muic_set_usb_path(pDevice, FALSE);
+        if (!NT_SUCCESS(rollback_status))
+        {
+            Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+                  "MUIC rollback after attach failure failed - 0x%x\n",
+                  rollback_status);
+        }
+
+        rollback_status = Ps5169ConfigureRedriver(
+            pDevice,
+            PS5169_CONFIG_ATTACH_NONE,
+            2);
+        if (!NT_SUCCESS(rollback_status))
+        {
+            Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+                  "PS5169 rollback after attach failure failed - 0x%x\n",
+                  rollback_status);
+        }
+
+        rollback_status = Sm5714BatterySetExternalPower(pDevice, FALSE);
+        if (!NT_SUCCESS(rollback_status))
+        {
+            Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+                  "Battery rollback after attach failure failed - 0x%x\n",
+                  rollback_status);
+        }
+
+        rollback_status = typec_notify_qualcomm_state(pDevice);
+        if (!NT_SUCCESS(rollback_status))
+        {
+            Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+                  "Qualcomm rollback after attach failure failed - 0x%x\n",
+                  rollback_status);
+        }
+    }
 
     return status;
 }
@@ -968,8 +1134,19 @@ static NTSTATUS typec_process_detach(_In_ PDEVICE_CONTEXT pDevice)
     if (NT_SUCCESS(status) && !NT_SUCCESS(operation_status))
         status = operation_status;
 
-    // Notify the USB stack
-    operation_status = typec_notify_usb_state(pDevice);
+    operation_status = Ps5169ConfigureRedriver(
+        pDevice,
+        PS5169_CONFIG_ATTACH_NONE,
+        2);
+    if (NT_SUCCESS(status) && !NT_SUCCESS(operation_status))
+        status = operation_status;
+
+    operation_status = Sm5714BatterySetExternalPower(pDevice, FALSE);
+    if (NT_SUCCESS(status) && !NT_SUCCESS(operation_status))
+        status = operation_status;
+
+    // Notify the Qualcomm USB connector manager.
+    operation_status = typec_notify_qualcomm_state(pDevice);
     if (NT_SUCCESS(status) && !NT_SUCCESS(operation_status))
         status = operation_status;
 
@@ -987,6 +1164,8 @@ NTSTATUS typec_process_interrupt(_In_ PDEVICE_CONTEXT pDevice)
     NTSTATUS event_status;
     UCHAR intr[5] = { 0 };
     UCHAR stat[5] = { 0 };
+    UCHAR cc_status = 0;
+    UCHAR current_attach;
     ULONG idx = SPB_USBPD_INDEX;
     ULONG register_index;
 
@@ -1073,24 +1252,42 @@ NTSTATUS typec_process_interrupt(_In_ PDEVICE_CONTEXT pDevice)
         Print(DEBUG_LEVEL_INFO, DBG_IOCTL, "VBUS detected\n");
     }
 
-    //
-    // Detach: process before attach to handle quick re-plug
-    //
-    if ((intr[0] & SM5714_INT_STATUS1_DETACH) &&
-        (stat[0] & SM5714_INT_STATUS1_DETACH))
+    // Resolve attach/detach races from the current CC state. Both event bits
+    // may be latched during a quick role transition, but only one final state
+    // must be published to the battery and Qualcomm clients.
+    if (intr[0] & (SM5714_INT_STATUS1_ATTACH | SM5714_INT_STATUS1_DETACH))
     {
-        event_status = typec_process_detach(pDevice);
-        if (NT_SUCCESS(status) && !NT_SUCCESS(event_status))
-            status = event_status;
-    }
+        event_status = read_reg8(
+            pDevice,
+            idx,
+            SM5714_REG_CC_STATUS,
+            &cc_status);
+        if (!NT_SUCCESS(event_status))
+        {
+            if (NT_SUCCESS(status))
+                status = event_status;
+            goto ProcessInterruptEnd;
+        }
 
-    //
-    // Attach event
-    //
-    if ((intr[0] & SM5714_INT_STATUS1_ATTACH) &&
-        (stat[0] & SM5714_INT_STATUS1_ATTACH))
-    {
-        event_status = typec_process_attach(pDevice);
+        current_attach = cc_status & SM5714_CC_ATTACH_TYPE;
+        if (current_attach != SM5714_ATTACH_NONE &&
+            (stat[0] & SM5714_INT_STATUS1_ATTACH))
+        {
+            event_status = typec_process_attach(pDevice);
+        }
+        else if (current_attach == SM5714_ATTACH_NONE &&
+                 (stat[0] & SM5714_INT_STATUS1_DETACH))
+        {
+            event_status = typec_process_detach(pDevice);
+        }
+        else
+        {
+            Print(DEBUG_LEVEL_INFO, DBG_IOCTL,
+                  "Ignoring stale Type-C event: INT1=0x%02x STATUS1=0x%02x CC_STATUS=0x%02x\n",
+                  intr[0], stat[0], cc_status);
+            event_status = STATUS_SUCCESS;
+        }
+
         if (NT_SUCCESS(status) && !NT_SUCCESS(event_status))
             status = event_status;
     }
@@ -1198,7 +1395,7 @@ NTSTATUS typec_set_otg_mode(_In_ PDEVICE_CONTEXT pDevice, _In_ BOOLEAN enable)
 // Evaluate the PM3P.USBR ACPI method to update global
 // Type-C state variables and notify the USB connector manager (UCS0).
 //
-NTSTATUS typec_notify_usb_state(_In_ PDEVICE_CONTEXT pDevice)
+NTSTATUS typec_notify_qualcomm_state(_In_ PDEVICE_CONTEXT pDevice)
 {
     NTSTATUS status;
     UCHAR attach = typec_reported_usb_attach(pDevice->AttachType);
@@ -1211,9 +1408,10 @@ NTSTATUS typec_notify_usb_state(_In_ PDEVICE_CONTEXT pDevice)
         vbus = 0;
     }
 
-    // Build ACPI method input: USBR(AttachType, CcOrientation, VbusPresent)
+    // Build ACPI method input:
+    // USBR(AttachType, CcOrientation, VbusPresent, SuperSpeedReady)
     ULONG inputSize = sizeof(ACPI_EVAL_INPUT_BUFFER_COMPLEX) +
-                      3 * sizeof(ACPI_METHOD_ARGUMENT);
+                      4 * sizeof(ACPI_METHOD_ARGUMENT);
 
     PACPI_EVAL_INPUT_BUFFER_COMPLEX pInput =
         (PACPI_EVAL_INPUT_BUFFER_COMPLEX)ExAllocatePoolZero(
@@ -1223,8 +1421,8 @@ NTSTATUS typec_notify_usb_state(_In_ PDEVICE_CONTEXT pDevice)
 
     pInput->Signature = ACPI_EVAL_INPUT_BUFFER_COMPLEX_SIGNATURE;
     RtlCopyMemory(pInput->MethodName, "USBR", 4);
-    pInput->Size = 3 * sizeof(ACPI_METHOD_ARGUMENT);
-    pInput->ArgumentCount = 3;
+    pInput->Size = 4 * sizeof(ACPI_METHOD_ARGUMENT);
+    pInput->ArgumentCount = 4;
 
     PACPI_METHOD_ARGUMENT pArg = &pInput->Argument[0];
     ACPI_METHOD_SET_ARGUMENT_INTEGER(pArg, (ULONG)attach);
@@ -1234,6 +1432,11 @@ NTSTATUS typec_notify_usb_state(_In_ PDEVICE_CONTEXT pDevice)
 
     pArg = ACPI_METHOD_NEXT_ARGUMENT(pArg);
     ACPI_METHOD_SET_ARGUMENT_INTEGER(pArg, (ULONG)vbus);
+
+    pArg = ACPI_METHOD_NEXT_ARGUMENT(pArg);
+    ACPI_METHOD_SET_ARGUMENT_INTEGER(
+        pArg,
+        pDevice->SuperSpeedReady ? 1UL : 0UL);
 
     WDF_MEMORY_DESCRIPTOR inDesc;
     WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&inDesc, pInput, inputSize);
@@ -1255,8 +1458,8 @@ NTSTATUS typec_notify_usb_state(_In_ PDEVICE_CONTEXT pDevice)
     else
     {
         Print(DEBUG_LEVEL_INFO, DBG_IOCTL,
-              "USB state notified: attach=%d cc=%d vbus=%d\n",
-              attach, cc_out, vbus);
+              "USB state notified: attach=%d cc=%d vbus=%d ss=%d\n",
+              attach, cc_out, vbus, pDevice->SuperSpeedReady);
     }
 
     ExFreePool(pInput);

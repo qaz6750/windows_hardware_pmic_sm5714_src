@@ -1,13 +1,187 @@
 #include "driver.h"
 #include "registers.h"
 #include "spbhelper.h"
+#include "ps5169interface.h"
+#include "..\..\SM5714Battery\inc\SM5714BatteryInterface.h"
 #include "..\Charger\charger.h"
 #include "..\TypeC\typec.h"
+
+DEFINE_GUID(GUID_DEVINTERFACE_PS5169,
+    0x5c5c7219, 0x67cc, 0x49d5, 0x9f, 0x18, 0x37, 0xe1, 0x13, 0xd9, 0x47, 0xe2);
+
+DEFINE_GUID(GUID_DEVINTERFACE_SM5714_BATTERY,
+    0x08e8729c, 0x2c8f, 0x49e2, 0xa4, 0xc2, 0xf3, 0xbb, 0x81, 0x47, 0x4b, 0xd0);
 
 static ULONG DebugLevel = 100;
 static ULONG DebugCategories = DBG_INIT | DBG_PNP | DBG_IOCTL;
 
 #define GET_INTEGER(_arg_) (*(PULONG UNALIGNED)((_arg_)->Data))
+
+static NTSTATUS
+Ps5169OpenTarget(
+    _In_ PDEVICE_CONTEXT pDevice
+)
+{
+    PWSTR symbolicLinkList = NULL;
+    UNICODE_STRING symbolicLink;
+    WDF_IO_TARGET_OPEN_PARAMS openParams;
+    NTSTATUS status;
+
+    if (pDevice->Ps5169TargetOpen)
+        return STATUS_SUCCESS;
+
+    status = IoGetDeviceInterfaces(
+        &GUID_DEVINTERFACE_PS5169,
+        NULL,
+        0,
+        &symbolicLinkList);
+    if (!NT_SUCCESS(status))
+        return status;
+
+    if (symbolicLinkList[0] == UNICODE_NULL)
+    {
+        ExFreePool(symbolicLinkList);
+        return STATUS_DEVICE_NOT_CONNECTED;
+    }
+
+    RtlInitUnicodeString(&symbolicLink, symbolicLinkList);
+    WDF_IO_TARGET_OPEN_PARAMS_INIT_OPEN_BY_NAME(
+        &openParams,
+        &symbolicLink,
+        GENERIC_READ | GENERIC_WRITE);
+    openParams.ShareAccess = FILE_SHARE_READ | FILE_SHARE_WRITE;
+
+    status = WdfIoTargetOpen(pDevice->Ps5169Target, &openParams);
+    ExFreePool(symbolicLinkList);
+    if (NT_SUCCESS(status))
+        pDevice->Ps5169TargetOpen = TRUE;
+
+    return status;
+}
+
+NTSTATUS
+Ps5169ConfigureRedriver(
+    _In_ PDEVICE_CONTEXT pDevice,
+    _In_ UCHAR attach,
+    _In_ UCHAR orientation
+)
+{
+    PS5169_CONFIG_REQUEST configRequest;
+    WDF_MEMORY_DESCRIPTOR inputDescriptor;
+    NTSTATUS status;
+
+    status = Ps5169OpenTarget(pDevice);
+    if (!NT_SUCCESS(status))
+        return status;
+
+    configRequest.Attach = attach;
+    configRequest.Orientation = orientation;
+    WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(
+        &inputDescriptor,
+        &configRequest,
+        sizeof(configRequest));
+
+    status = WdfIoTargetSendIoctlSynchronously(
+        pDevice->Ps5169Target,
+        NULL,
+        IOCTL_PS5169_CONFIGURE,
+        &inputDescriptor,
+        NULL,
+        NULL,
+        NULL);
+    if (!NT_SUCCESS(status) &&
+        (status == STATUS_DEVICE_NOT_CONNECTED ||
+         status == STATUS_DELETE_PENDING ||
+         status == STATUS_INVALID_DEVICE_STATE))
+    {
+        WdfIoTargetClose(pDevice->Ps5169Target);
+        pDevice->Ps5169TargetOpen = FALSE;
+    }
+
+    return status;
+}
+
+static NTSTATUS
+Sm5714BatteryOpenTarget(
+    _In_ PDEVICE_CONTEXT pDevice
+)
+{
+    PWSTR symbolicLinkList = NULL;
+    UNICODE_STRING symbolicLink;
+    WDF_IO_TARGET_OPEN_PARAMS openParams;
+    NTSTATUS status;
+
+    if (pDevice->BatteryTargetOpen)
+        return STATUS_SUCCESS;
+
+    status = IoGetDeviceInterfaces(
+        &GUID_DEVINTERFACE_SM5714_BATTERY,
+        NULL,
+        0,
+        &symbolicLinkList);
+    if (!NT_SUCCESS(status))
+        return status;
+
+    if (symbolicLinkList[0] == UNICODE_NULL)
+    {
+        ExFreePool(symbolicLinkList);
+        return STATUS_DEVICE_NOT_CONNECTED;
+    }
+
+    RtlInitUnicodeString(&symbolicLink, symbolicLinkList);
+    WDF_IO_TARGET_OPEN_PARAMS_INIT_OPEN_BY_NAME(
+        &openParams,
+        &symbolicLink,
+        GENERIC_WRITE);
+    openParams.ShareAccess = FILE_SHARE_READ | FILE_SHARE_WRITE;
+
+    status = WdfIoTargetOpen(pDevice->BatteryTarget, &openParams);
+    ExFreePool(symbolicLinkList);
+    if (NT_SUCCESS(status))
+        pDevice->BatteryTargetOpen = TRUE;
+
+    return status;
+}
+
+NTSTATUS
+Sm5714BatterySetExternalPower(
+    _In_ PDEVICE_CONTEXT pDevice,
+    _In_ BOOLEAN externalPowerOnline
+)
+{
+    SM5714_BATTERY_POWER_REQUEST powerRequest;
+    WDF_MEMORY_DESCRIPTOR inputDescriptor;
+    NTSTATUS status;
+
+    status = Sm5714BatteryOpenTarget(pDevice);
+    if (!NT_SUCCESS(status))
+        return status;
+
+    powerRequest.ExternalPowerOnline = externalPowerOnline ? 1UL : 0UL;
+    WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(
+        &inputDescriptor,
+        &powerRequest,
+        sizeof(powerRequest));
+
+    status = WdfIoTargetSendIoctlSynchronously(
+        pDevice->BatteryTarget,
+        NULL,
+        IOCTL_SM5714_BATTERY_SET_EXTERNAL_POWER,
+        &inputDescriptor,
+        NULL,
+        NULL,
+        NULL);
+    if (!NT_SUCCESS(status) &&
+        (status == STATUS_DEVICE_NOT_CONNECTED ||
+         status == STATUS_DELETE_PENDING ||
+         status == STATUS_INVALID_DEVICE_STATE))
+    {
+        WdfIoTargetClose(pDevice->BatteryTarget);
+        pDevice->BatteryTargetOpen = FALSE;
+    }
+
+    return status;
+}
 
 //
 // ISR for charger interrupt (GPIO 54)
@@ -361,6 +535,8 @@ Status
 
     pDevice->DevicePoweredOn = FALSE;
     pDevice->TypecInitialized = FALSE;
+    pDevice->Ps5169TargetOpen = FALSE;
+    pDevice->BatteryTargetOpen = FALSE;
 
     status = FetchPmicConfig(FxDevice, pDevice);
     if (!NT_SUCCESS(status))
@@ -452,6 +628,23 @@ Status
 
     pDevice->DevicePoweredOn = TRUE;
 
+    status = Ps5169OpenTarget(pDevice);
+    if (!NT_SUCCESS(status))
+    {
+        Print(DEBUG_LEVEL_INFO, DBG_INIT,
+              "PS5169 target unavailable - 0x%x, USB2 fallback remains available\n",
+              status);
+        status = STATUS_SUCCESS;
+    }
+
+    status = Sm5714BatteryOpenTarget(pDevice);
+    if (!NT_SUCCESS(status))
+    {
+        Print(DEBUG_LEVEL_INFO, DBG_INIT,
+              "SM5714 battery target unavailable - 0x%x\n", status);
+        status = STATUS_SUCCESS;
+    }
+
     // Initialize the USBPD Type-C controller if we have the second I2C bus
     if (pDevice->SpbContextCount >= 2)
     {
@@ -488,6 +681,16 @@ exit:
     {
         pDevice->DevicePoweredOn = FALSE;
         pDevice->TypecInitialized = FALSE;
+        if (pDevice->Ps5169TargetOpen)
+        {
+            WdfIoTargetClose(pDevice->Ps5169Target);
+            pDevice->Ps5169TargetOpen = FALSE;
+        }
+        if (pDevice->BatteryTargetOpen)
+        {
+            WdfIoTargetClose(pDevice->BatteryTarget);
+            pDevice->BatteryTargetOpen = FALSE;
+        }
         if (pDevice->DataLock != NULL)
         {
             WdfObjectDelete(pDevice->DataLock);
@@ -526,6 +729,18 @@ Status
 
     pDevice->DevicePoweredOn = FALSE;
     pDevice->TypecInitialized = FALSE;
+
+    if (pDevice->Ps5169TargetOpen)
+    {
+        WdfIoTargetClose(pDevice->Ps5169Target);
+        pDevice->Ps5169TargetOpen = FALSE;
+    }
+
+    if (pDevice->BatteryTargetOpen)
+    {
+        WdfIoTargetClose(pDevice->BatteryTarget);
+        pDevice->BatteryTargetOpen = FALSE;
+    }
 
     // Only disable charging if transitioning to OFF state (S5)
     if (FxPreviousState == WdfPowerDeviceD3Final)
@@ -618,6 +833,26 @@ EvtDeviceAdd(
     //
     devContext = GetDeviceContext(device);
     devContext->FxDevice = device;
+
+    WDF_OBJECT_ATTRIBUTES_INIT(&attributes);
+    attributes.ParentObject = device;
+    status = WdfIoTargetCreate(device, &attributes, &devContext->Ps5169Target);
+    if (!NT_SUCCESS(status))
+    {
+        Print(DEBUG_LEVEL_ERROR, DBG_PNP,
+              "PS5169 I/O target create failed 0x%x\n", status);
+        return status;
+    }
+
+    WDF_OBJECT_ATTRIBUTES_INIT(&attributes);
+    attributes.ParentObject = device;
+    status = WdfIoTargetCreate(device, &attributes, &devContext->BatteryTarget);
+    if (!NT_SUCCESS(status))
+    {
+        Print(DEBUG_LEVEL_ERROR, DBG_PNP,
+              "SM5714 battery I/O target create failed 0x%x\n", status);
+        return status;
+    }
 
     //
     // Create interrupt objects for the two GPIO interrupts in _CRS.

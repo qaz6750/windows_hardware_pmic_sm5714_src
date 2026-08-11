@@ -911,7 +911,7 @@ ChargerProcessInterrupts(
     // INT3: system / thermal
     //
     if (i3 & CHG_INT3_OTGFAIL) {
-        /* OTG boost overcurrent — shut down boost to protect connected device */
+        /* Shut down OTG boost on overcurrent to protect the connected device. */
         Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
               "  OTG boost fail (overcurrent)! Disabling OTG\n");
           action_status = typec_set_otg_mode(pDevice, FALSE);

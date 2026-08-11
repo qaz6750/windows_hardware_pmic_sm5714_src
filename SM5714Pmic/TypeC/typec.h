@@ -25,7 +25,7 @@
 NTSTATUS typec_reg_init(_In_ PDEVICE_CONTEXT pDevice);
 NTSTATUS typec_process_interrupt(_In_ PDEVICE_CONTEXT pDevice);
 NTSTATUS typec_set_otg_mode(_In_ PDEVICE_CONTEXT pDevice, _In_ BOOLEAN enable);
-NTSTATUS typec_notify_usb_state(_In_ PDEVICE_CONTEXT pDevice);
+NTSTATUS typec_notify_qualcomm_state(_In_ PDEVICE_CONTEXT pDevice);
 NTSTATUS typec_check_initial_state(_In_ PDEVICE_CONTEXT pDevice);
 
 #endif // _TYPEC_H_

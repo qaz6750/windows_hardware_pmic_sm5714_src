@@ -30,7 +30,13 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\SM5714Battery\inc\SM5714BatteryInterface.h">
+      <Filter>Header Files\Common</Filter>
+    </ClInclude>
     <ClInclude Include="Common\driver.h">
+      <Filter>Header Files\Common</Filter>
+    </ClInclude>
+    <ClInclude Include="Common\ps5169interface.h">
       <Filter>Header Files\Common</Filter>
     </ClInclude>
     <ClInclude Include="Common\registers.h">

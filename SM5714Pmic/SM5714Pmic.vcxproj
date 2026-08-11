@@ -138,7 +138,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Charger\charger.h" />
+    <ClInclude Include="..\SM5714Battery\inc\SM5714BatteryInterface.h" />
     <ClInclude Include="Common\driver.h" />
+    <ClInclude Include="Common\ps5169interface.h" />
     <ClInclude Include="Common\registers.h" />
     <ClInclude Include="Common\spb.h" />
     <ClInclude Include="Common\spbhelper.h" />
