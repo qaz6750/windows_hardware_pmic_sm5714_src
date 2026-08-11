@@ -784,16 +784,7 @@ static NTSTATUS typec_apply_attach_policy(_In_ PDEVICE_CONTEXT pDevice)
               "Battery power state update failed - 0x%x\n", battery_status);
     }
 
-    // Publish the Type-C role and SuperSpeed readiness before D+/D- can enumerate.
-    status = typec_notify_qualcomm_state(pDevice);
-    if (!NT_SUCCESS(status))
-    {
-        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
-              "Qualcomm USB state notification failed - 0x%x; preserving physical attach\n",
-              status);
-    }
-
-    // Connect D+/D- only after the redriver and Qualcomm state are settled.
+    // Connect D+/D- only after the SuperSpeed redriver has been configured.
     status = muic_set_usb_path(pDevice, TRUE);
     if (!NT_SUCCESS(status))
     {
@@ -826,6 +817,16 @@ static NTSTATUS typec_apply_attach_policy(_In_ PDEVICE_CONTEXT pDevice)
                   redriver_status);
         }
         return status;
+    }
+
+    // Publish the role only after both the SuperSpeed and D+/D- paths are
+    // physically ready, matching the previously working enumeration order.
+    status = typec_notify_qualcomm_state(pDevice);
+    if (!NT_SUCCESS(status))
+    {
+        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+              "Qualcomm USB state notification failed - 0x%x; preserving physical attach\n",
+              status);
     }
 
     return STATUS_SUCCESS;
