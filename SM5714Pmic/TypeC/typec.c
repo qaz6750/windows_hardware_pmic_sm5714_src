@@ -788,25 +788,9 @@ static NTSTATUS typec_apply_attach_policy(_In_ PDEVICE_CONTEXT pDevice)
     status = typec_notify_qualcomm_state(pDevice);
     if (!NT_SUCCESS(status))
     {
-        redriver_status = Ps5169ConfigureRedriver(
-            pDevice,
-            PS5169_CONFIG_ATTACH_NONE,
-            2);
-        if (!NT_SUCCESS(redriver_status))
-        {
-            Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
-                  "PS5169 rollback after USBR failure failed - 0x%x\n",
-                  redriver_status);
-        }
-
-        battery_status = Sm5714BatterySetExternalPower(pDevice, FALSE);
-        if (!NT_SUCCESS(battery_status))
-        {
-            Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
-                  "Battery rollback after USBR failure failed - 0x%x\n",
-                  battery_status);
-        }
-        return status;
+        Print(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+              "Qualcomm USB state notification failed - 0x%x; preserving physical attach\n",
+              status);
     }
 
     // Connect D+/D- only after the redriver and Qualcomm state are settled.
