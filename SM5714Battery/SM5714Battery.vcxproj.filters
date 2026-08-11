@@ -23,6 +23,9 @@
     <ClInclude Include="inc\SM5714Battery.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="inc\SM5714BatteryInterface.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="inc\SM5714Battery_regs.h">
       <Filter>Header Files</Filter>
     </ClInclude>

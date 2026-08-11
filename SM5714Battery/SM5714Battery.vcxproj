@@ -91,6 +91,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="inc\SM5714Battery.h" />
+    <ClInclude Include="inc\SM5714BatteryInterface.h" />
     <ClInclude Include="inc\SM5714Battery_regs.h" />
     <ClInclude Include="inc\sm5714_fuelgauge.h" />
     <ClInclude Include="inc\Spb.h" />

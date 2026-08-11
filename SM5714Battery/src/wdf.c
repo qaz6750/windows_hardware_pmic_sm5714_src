@@ -18,11 +18,14 @@ Abstract:
 //--------------------------------------------------------------------- Includes
 
 #include "..\inc\SM5714Battery.h"
+#include "..\inc\SM5714BatteryInterface.h"
 #include "wdf.tmh"
 #include <initguid.h>
 #include <acpiioct.h>
-#include <wdmguid.h>
 #include <wdm.h>
+
+DEFINE_GUID(GUID_DEVINTERFACE_SM5714_BATTERY,
+	0x08e8729c, 0x2c8f, 0x49e2, 0xa4, 0xc2, 0xf3, 0xbb, 0x81, 0x47, 0x4b, 0xd0);
 
 //------------------------------------------------------------------- Prototypes
 
@@ -57,23 +60,6 @@ EVT_WDF_OBJECT_CONTEXT_CLEANUP SM5714BatteryEvtDriverContextCleanup;
 //-------------------------------------------------------------------- Functions
 
 #define GET_INTEGER(_arg_)  (*(PULONG UNALIGNED) ((_arg_)->Data))
-
-//----------------------------------------- ACPI Device Notification Support
-
-static ACPI_INTERFACE_STANDARD2 s_AcpiInterface;
-static BOOLEAN s_AcpiNotifyRegistered = FALSE;
-
-static VOID
-SM5714BatteryAcpiNotifyCallback(
-	_In_ PVOID Context,
-	_In_ ULONG NotifyValue
-)
-{
-	PSM5714_BATTERY_FDO_DATA DevExt = (PSM5714_BATTERY_FDO_DATA)Context;
-	if (NotifyValue == 0x80 && DevExt->ClassHandle != NULL) {
-		BatteryClassStatusNotify(DevExt->ClassHandle);
-	}
-}
 
 NTSTATUS
 Sm5714FetchCapacities(
@@ -344,6 +330,18 @@ Return Value:
 	DevExt->Device = DeviceHandle;
 	DevExt->BatteryTag = BATTERY_TAG_INVALID;
 	DevExt->ClassHandle = NULL;
+	DevExt->ExternalPowerOnline = FALSE;
+
+	Status = WdfDeviceCreateDeviceInterface(
+		DeviceHandle,
+		&GUID_DEVINTERFACE_SM5714_BATTERY,
+		NULL);
+	if (!NT_SUCCESS(Status)) {
+		Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_ERROR,
+			"WdfDeviceCreateDeviceInterface() Failed. 0x%x\n", Status);
+		goto DriverDeviceAddEnd;
+	}
+
 	WDF_OBJECT_ATTRIBUTES_INIT(&LockAttributes);
 	LockAttributes.ParentObject = DeviceHandle;
 	Status = WdfWaitLockCreate(&LockAttributes, &DevExt->ClassInitLock);
@@ -454,38 +452,6 @@ Return Value:
 		Status = STATUS_SUCCESS;
 	}
 
-	//
-	// Register for ACPI device notifications.
-	// When PM3P.USBR executes Notify(BAT, 0x80), the callback calls
-	// BatteryClassStatusNotify so charging state updates immediately.
-	//
-
-	RtlZeroMemory(&s_AcpiInterface, sizeof(s_AcpiInterface));
-	{
-		NTSTATUS AcpiStatus = WdfFdoQueryForInterface(
-			Device,
-			&GUID_ACPI_INTERFACE_STANDARD2,
-			(PINTERFACE)&s_AcpiInterface,
-			sizeof(s_AcpiInterface),
-			1,
-			NULL);
-
-		if (NT_SUCCESS(AcpiStatus) &&
-			s_AcpiInterface.RegisterForDeviceNotifications != NULL)
-		{
-			AcpiStatus = s_AcpiInterface.RegisterForDeviceNotifications(
-				s_AcpiInterface.Context,
-				SM5714BatteryAcpiNotifyCallback,
-				DevExt);
-			s_AcpiNotifyRegistered = NT_SUCCESS(AcpiStatus);
-		}
-
-		if (!s_AcpiNotifyRegistered) {
-			Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_WARN,
-				"ACPI notification registration failed, charging state updates may be delayed\n");
-		}
-	}
-
 DevicePrepareHardwareEnd:
 	Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE, "Leaving %!FUNC!: Status = 0x%08lX\n", Status);
 	return Status;
@@ -531,21 +497,6 @@ Return Value:
 	}
 
 	DevExt = GetDeviceExtension(Device);
-
-	//
-	// Unregister ACPI notifications before releasing battery class.
-	//
-
-	if (s_AcpiNotifyRegistered) {
-		s_AcpiInterface.UnregisterForDeviceNotifications(
-			s_AcpiInterface.Context);
-		s_AcpiNotifyRegistered = FALSE;
-	}
-
-	if (s_AcpiInterface.InterfaceDereference != NULL) {
-		s_AcpiInterface.InterfaceDereference(s_AcpiInterface.Context);
-		RtlZeroMemory(&s_AcpiInterface, sizeof(s_AcpiInterface));
-	}
 
 	WdfWaitLockAcquire(DevExt->ClassInitLock, NULL);
 	if (DevExt->ClassHandle != NULL) {
@@ -761,6 +712,52 @@ Return Value:
 
 	DevExt = GetDeviceExtension(Device);
 	Status = STATUS_NOT_SUPPORTED;
+
+	{
+		PIO_STACK_LOCATION IrpStack = IoGetCurrentIrpStackLocation(Irp);
+
+		if (IrpStack->Parameters.DeviceIoControl.IoControlCode ==
+			IOCTL_SM5714_BATTERY_SET_EXTERNAL_POWER)
+		{
+			PSM5714_BATTERY_POWER_REQUEST PowerRequest =
+				(PSM5714_BATTERY_POWER_REQUEST)Irp->AssociatedIrp.SystemBuffer;
+			BOOLEAN StateChanged;
+
+			if (IrpStack->Parameters.DeviceIoControl.InputBufferLength <
+				sizeof(*PowerRequest) || PowerRequest == NULL)
+			{
+				Status = STATUS_BUFFER_TOO_SMALL;
+			}
+			else if (PowerRequest->ExternalPowerOnline > 1)
+			{
+				Status = STATUS_INVALID_PARAMETER;
+			}
+			else
+			{
+				WdfWaitLockAcquire(DevExt->StateLock, NULL);
+				StateChanged = DevExt->ExternalPowerOnline !=
+					(BOOLEAN)PowerRequest->ExternalPowerOnline;
+				DevExt->ExternalPowerOnline =
+					(BOOLEAN)PowerRequest->ExternalPowerOnline;
+				WdfWaitLockRelease(DevExt->StateLock);
+
+				if (StateChanged)
+				{
+					WdfWaitLockAcquire(DevExt->ClassInitLock, NULL);
+					if (DevExt->ClassHandle != NULL)
+						BatteryClassStatusNotify(DevExt->ClassHandle);
+					WdfWaitLockRelease(DevExt->ClassInitLock);
+				}
+
+				Status = STATUS_SUCCESS;
+			}
+
+			Irp->IoStatus.Status = Status;
+			Irp->IoStatus.Information = 0;
+			IoCompleteRequest(Irp, IO_NO_INCREMENT);
+			return Status;
+		}
+	}
 
 	//
 	// Suppress 28118:Irq Exceeds Caller, see Routine Description for

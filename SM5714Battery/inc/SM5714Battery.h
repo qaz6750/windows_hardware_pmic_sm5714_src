@@ -113,6 +113,7 @@ typedef struct {
     UCHAR                           BatteryTechnology;
     ULONG                           DesignVoltage_mV;
     ULONG                           BatterySoh;         /* State-of-Health, 0-100 % */
+    BOOLEAN                         ExternalPowerOnline;
 } SM5714_BATTERY_FDO_DATA, *PSM5714_BATTERY_FDO_DATA;
 
 //------------------------------------------------------ WDF Context Declaration

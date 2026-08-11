@@ -21,7 +21,6 @@ Abstract:
 #include "usbfnbase.h"
 #include "miniclass.tmh"
 #include "..\inc\sm5714_fuelgauge.h"
-#include <acpiioct.h>
 
 //------------------------------------------------------------------- Prototypes
 
@@ -388,9 +387,7 @@ Return Value:
 	WCHAR StringResult[MAX_BATTERY_STRING_SIZE] = { 0 };
 	BATTERY_MANUFACTURE_DATE ManufactureDate = { 0 };
 
-	unsigned short rawTemp = 0;
 	ULONG Temperature = 0;
-	USHORT DateData = 0;
 
 	Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE, "Entering %!FUNC!\n");
 	PAGED_CODE();
@@ -595,50 +592,6 @@ QueryInformationEnd:
 	return Status;
 }
 
-//
-// Query the ACPI GBST method to get charging state from TypeC detection.
-// Returns TRUE if charging (charger cable attached), FALSE if discharging.
-//
-static BOOLEAN Sm5714QueryChargingState(_In_ PSM5714_BATTERY_FDO_DATA DevExt)
-{
-	ACPI_EVAL_INPUT_BUFFER input = { 0 };
-	input.Signature = ACPI_EVAL_INPUT_BUFFER_SIGNATURE;
-	RtlCopyMemory(input.MethodName, "GBST", 4);
-
-	ULONG const outLen = sizeof(ACPI_EVAL_OUTPUT_BUFFER) +
-		sizeof(ACPI_METHOD_ARGUMENT);
-	PACPI_EVAL_OUTPUT_BUFFER output =
-		(PACPI_EVAL_OUTPUT_BUFFER)ExAllocatePoolZero(
-			NonPagedPoolNx, outLen, 'tsbG');
-	if (!output)
-		return FALSE;
-
-	WDF_MEMORY_DESCRIPTOR inDesc, outDesc;
-	WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&inDesc, &input, sizeof(input));
-	WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&outDesc, output, outLen);
-
-	NTSTATUS status = WdfIoTargetSendIoctlSynchronously(
-		WdfDeviceGetIoTarget(DevExt->Device),
-		NULL,
-		IOCTL_ACPI_EVAL_METHOD,
-		&inDesc,
-		&outDesc,
-		NULL,
-		NULL);
-
-	BOOLEAN charging = FALSE;
-	if (NT_SUCCESS(status) &&
-		output->Signature == ACPI_EVAL_OUTPUT_BUFFER_SIGNATURE &&
-		output->Count >= 1 &&
-		output->Argument[0].Type == ACPI_METHOD_ARGUMENT_INTEGER)
-	{
-		charging = (output->Argument[0].Argument != 0);
-	}
-
-	ExFreePool(output);
-	return charging;
-}
-
 _Use_decl_annotations_
 NTSTATUS
 SM5714BatteryQueryStatus(
@@ -685,14 +638,14 @@ Return Value:
 	}
 
 	// Fetch State of Charge
-	unsigned int     Capacity = 0;
+	ULONG Capacity = 0;
 	Status = sm5714_Get_BatterySoC(DevExt, &Capacity);
 	if (!NT_SUCCESS(Status)) {
 		goto QueryStatusEnd;
 	}
 
 	// Fetch Voltage(mV)
-	unsigned int     Voltage = 0;
+	ULONG Voltage = 0;
 	Status = sm5714_Get_BatteryVoltage(DevExt, &Voltage);
 	if (!NT_SUCCESS(Status)) {
 		goto QueryStatusEnd;
@@ -706,11 +659,7 @@ Return Value:
 	}
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "CURRENT: %d mA\n", Current);
 
-	//
-	// Determine power state from TypeC detection (via ACPI GBST method).
-	// GBST returns 1 when a charger is attached, 0 when discharging/OTG.
-	//
-	if (Sm5714QueryChargingState(DevExt)) {
+	if (DevExt->ExternalPowerOnline) {
 		Trace(TRACE_LEVEL_INFORMATION, SM5714_BATTERY_TRACE, "BATTERY_POWER_ON_LINE\n");
 		BatteryStatus->PowerState = BATTERY_POWER_ON_LINE;
 	}

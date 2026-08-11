@@ -225,7 +225,7 @@ sm5714_Get_BatteryHealth(
 		goto Exit;
 	}
 
-	/* Convert raw aging rate to percentage (Q11.0 → %) */
+	/* Convert raw aging rate to percentage (Q11.0 to %) */
 	icSoh     = (int)((unsigned int)rawAgingRate * 100 / 2048);
 	storedSoh = (int)(rawReserv & 0x7F);
 
